@@ -1,4 +1,5 @@
 use super::*;
+use std::os::unix::fs::PermissionsExt;
 use std::time::Instant;
 
 #[test]
@@ -232,6 +233,8 @@ fn song_with_id3_lyrics() {
     let d = doc(&path, &s.home(), &s.cache()).unwrap();
     assert_eq!(d.subtitle, "~/Music · The Band");
     assert_eq!(d.names, vec!["Rainy Day", "The Band"]);
+    let q = quick_doc(&path, &s.home(), &s.cache()).unwrap();
+    assert_eq!((q.subtitle, q.names, q.icon), (d.subtitle.clone(), d.names.clone(), d.icon.clone()), "quick_doc reuses doc's tags");
     assert_eq!(d.parts.len(), 1);
     assert_eq!(d.parts[0].text, "Rain on the window\nI miss you");
     assert!(matches!(&d.parts[0].embed, Embed::Text(t) if t.starts_with("title: Rainy Day | text: Rain")));
@@ -251,4 +254,79 @@ fn audio_without_speech_to_text() {
     tone(&path, "2");
     let d = doc(&path, &s.home(), &s.cache()).unwrap();
     assert!(!d.stamp.contains("-stt") && d.parts.is_empty() && d.icon == "audio-x-generic");
+}
+
+#[test]
+fn quick_doc_names_now_and_reuses_the_cache() {
+    let s = Scratch::new("quick");
+    let path = s.home().join("Pictures/beach day.jpg");
+    ffmpeg(&["-f", "lavfi", "-i", "testsrc2=s=640x480:d=1", "-frames:v", "1"], &path);
+    let q = quick_doc(&path, &s.home(), &s.cache()).unwrap();
+    assert_eq!(
+        (q.key.as_str(), q.kind, q.title.as_str(), q.subtitle.as_str(), q.icon.as_str()),
+        ("file:Pictures/beach day.jpg", Kind::Image, "beach day.jpg", "~/Pictures", "image-x-generic")
+    );
+    assert_eq!(q.action, Action::Open { path: path.display().to_string(), locator: Locator::default() });
+    assert_eq!(q.stamp, format!("quick-{}", stamp(&path, &s.home()).unwrap()));
+    assert!(q.parts.is_empty() && q.names.is_empty());
+    // Once doc has run on this version of the file, the quick Doc has its thumbnail.
+    let d = doc(&path, &s.home(), &s.cache()).unwrap();
+    let q = quick_doc(&path, &s.home(), &s.cache()).unwrap();
+    assert!(q.icon == d.icon && Path::new(&q.icon).is_file() && q.parts.is_empty() && q.stamp != d.stamp);
+    let t = Instant::now();
+    for _ in 0..100 {
+        quick_doc(&path, &s.home(), &s.cache()).unwrap();
+    }
+    println!("quick_doc {:?}", t.elapsed() / 100);
+    assert!(t.elapsed() < Duration::from_millis(100), "quick_doc took {:?} per call", t.elapsed() / 100);
+    assert!(quick_doc(&s.home().join("notes.txt"), &s.home(), &s.cache()).is_none());
+}
+
+#[test]
+fn lrc_changes_the_stamp_and_names_its_song() {
+    let s = Scratch::new("lrcstamp");
+    let music = s.home().join("Music");
+    let (song, lrc) = (music.join("Track 1.MP3"), music.join("Track 1.lrc"));
+    fs::write(&song, "audio").unwrap();
+    fs::write(music.join("Track 1.mp4"), "video").unwrap(); // a video is not a .lrc's owner
+    let stamps: Vec<String> = [None, Some("[00:01.00]one"), Some("[00:01.00]one two"), None]
+        .into_iter()
+        .map(|text| {
+            match text {
+                Some(t) => fs::write(&lrc, t).unwrap(),
+                None => drop(fs::remove_file(&lrc)),
+            }
+            stamp(&song, &s.home()).unwrap()
+        })
+        .collect();
+    assert!(stamps[0] != stamps[1] && stamps[1] != stamps[2] && stamps[3] == stamps[0], "{stamps:?}");
+    assert_eq!(lrc_owner(&lrc), Some(song.clone()), "also once the .lrc is deleted");
+    assert_eq!(lrc_owner(&music.join("notes.lrc")), None);
+    assert_eq!(lrc_owner(&song), None);
+}
+
+#[test]
+fn hung_tool_is_killed_with_its_children() {
+    let s = Scratch::new("hang");
+    let data = s.home().join(".local/share/superspace");
+    fs::create_dir_all(data.join("whisper")).unwrap();
+    fs::create_dir_all(data.join("models")).unwrap();
+    for m in ["ggml-base-q8_0.bin", "ggml-silero-v6.2.0.bin"] {
+        fs::write(data.join("models").join(m), "").unwrap();
+    }
+    // A fake whisper that never ends; its child keeps the output pipes open, so only
+    // killing the whole group lets doc return.
+    let cli = data.join("whisper/whisper-cli");
+    fs::write(&cli, "#!/bin/sh\nsleep 600 &\nsleep 600\n").unwrap();
+    fs::set_permissions(&cli, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = s.home().join("Music/voice.mp3");
+    tone(&path, "1");
+    let t = Instant::now();
+    let d = doc(&path, &s.home(), &s.cache()).unwrap();
+    // The limit is GRACE (3 s in tests) plus 3 s per second of audio: about 6 s here.
+    let took = t.elapsed();
+    assert!((Duration::from_secs(5)..Duration::from_secs(15)).contains(&took), "doc took {took:?}");
+    assert!(d.stamp.ends_with("-stt") && d.parts.is_empty());
+    let saved = fs::read_dir(s.cache().join("media")).unwrap().flatten().flat_map(|i| fs::read_dir(i.path()).unwrap().flatten());
+    assert!(!saved.into_iter().any(|v| v.path().join("parts.json").exists()), "a hung tool's result is not cached");
 }

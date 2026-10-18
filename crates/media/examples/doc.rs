@@ -9,6 +9,9 @@ fn main() {
     let cache = PathBuf::from(args.next().expect("usage: doc CACHE_DIR FILE…"));
     for file in args {
         let start = Instant::now();
+        let quick = ss_media::quick_doc(Path::new(&file), &home, &cache).map(|q| (start.elapsed(), q.icon));
+        println!("{file}: quick_doc {quick:?}");
+        let start = Instant::now();
         let Some(d) = ss_media::doc(Path::new(&file), &home, &cache) else {
             println!("{file}: not media");
             continue;

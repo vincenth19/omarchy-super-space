@@ -5,6 +5,7 @@
 //! whisper.cpp's `whisper-cli` (speech to text). Results are kept under
 //! `<cache>/media/<hash of path>/<hash of stamp>/`, so indexing an unchanged
 //! file again only reads `parts.json`; a changed file's old results are removed.
+//! A tool that runs far longer than the media's length is killed with its children.
 //!
 //! Speech to text needs, under `$SUPERSPACE_DATA` (default
 //! `~/.local/share/superspace`): `whisper/whisper-cli` (the official
@@ -19,7 +20,8 @@ use std::io::Read;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::time::UNIX_EPOCH;
+use std::sync::mpsc;
+use std::time::{Duration, UNIX_EPOCH};
 
 const IMAGE: &[&str] = &["jpg", "jpeg", "png", "webp", "gif", "bmp", "tif", "tiff", "heic", "heif", "avif", "jxl"];
 const VIDEO: &[&str] = &["mp4", "m4v", "mkv", "webm", "mov", "avi", "wmv", "flv", "mpg", "mpeg", "3gp", "ogv"];
@@ -28,6 +30,9 @@ const AUDIO: &[&str] = &["mp3", "flac", "ogg", "oga", "opus", "m4a", "aac", "wav
 const WINDOW: f32 = 15.0;
 /// At most this many characters of a long text go to the model.
 const EMBED_CHARS: usize = 2000;
+/// A tool still running after this many seconds, plus 3 per second of media, is hung and
+/// gets killed (whisper on a busy Pi runs near real time). Short in tests, which hang a fake tool.
+const GRACE: f32 = if cfg!(test) { 3.0 } else { 120.0 };
 
 fn kind(path: &Path) -> Option<Kind> {
     let ext = path.extension()?.to_str()?.to_ascii_lowercase();
@@ -67,13 +72,11 @@ pub fn stamp(path: &Path, home: &Path) -> Option<String> {
 pub fn doc(path: &Path, home: &Path, cache: &Path) -> Option<Doc> {
     let kind = kind(path)?;
     let stamp = stamp(path, home)?;
-    let item = item_dir(path, cache);
-    let dir = item.join(format!("{:016x}", fnv(stamp.as_bytes())));
-    let saved = fs::read(dir.join("parts.json")).ok().and_then(|b| serde_json::from_slice::<Saved>(&b).ok());
-    let saved = match saved {
+    let dir = results(path, cache, &stamp);
+    let saved = match load(&dir) {
         Some(s) => s,
         None => {
-            let _ = fs::remove_dir_all(&item); // results for an older version of the file
+            let _ = fs::remove_dir_all(item_dir(path, cache)); // results for an older version of the file
             fs::create_dir_all(&dir).ok()?;
             let (saved, complete) = build(kind, path, home, &dir);
             if complete && let Ok(json) = serde_json::to_vec(&saved) {
@@ -82,6 +85,33 @@ pub fn doc(path: &Path, home: &Path, cache: &Path) -> Option<Doc> {
             saved
         }
     };
+    finish(path, home, kind, stamp, saved)
+}
+
+/// `doc` without the slow work and without parts, in microseconds, so new media is found
+/// by name at once: the thumbnail, tags and artist too when `doc` already ran on this
+/// version of the file. Its stamp ("quick-" + `stamp`) never equals `doc`'s.
+pub fn quick_doc(path: &Path, home: &Path, cache: &Path) -> Option<Doc> {
+    let kind = kind(path)?;
+    let stamp = stamp(path, home)?;
+    let saved = load(&results(path, cache, &stamp)).unwrap_or_else(|| Saved { icon: generic(kind), ..Saved::default() });
+    finish(path, home, kind, format!("quick-{stamp}"), Saved { parts: Vec::new(), ..saved })
+}
+
+/// The audio file a `.lrc` holds the lyrics of (same name, any audio extension), whose
+/// `stamp` changes with it. Works after the `.lrc` is deleted, too.
+pub fn lrc_owner(lrc: &Path) -> Option<PathBuf> {
+    if lrc.extension()? != "lrc" {
+        return None;
+    }
+    let stem = lrc.file_stem()?;
+    fs::read_dir(lrc.parent()?).ok()?.flatten().find_map(|e| {
+        let p = e.path();
+        (e.file_type().is_ok_and(|t| t.is_file()) && p.file_stem() == Some(stem) && kind(&p) == Some(Kind::Audio)).then_some(p)
+    })
+}
+
+fn finish(path: &Path, home: &Path, kind: Kind, stamp: String, saved: Saved) -> Option<Doc> {
     let mut subtitle = match path.parent().map(|p| (p, p.strip_prefix(home))) {
         Some((_, Ok(d))) if d.as_os_str().is_empty() => "~".to_owned(),
         Some((_, Ok(d))) => format!("~/{}", d.display()),
@@ -117,6 +147,25 @@ pub fn forget(path: &Path, cache: &Path) {
 
 fn item_dir(path: &Path, cache: &Path) -> PathBuf {
     cache.join("media").join(format!("{:016x}", fnv(path.as_os_str().as_encoded_bytes())))
+}
+
+/// Where `doc` keeps its results for this version (`stamp`) of the file.
+fn results(path: &Path, cache: &Path, stamp: &str) -> PathBuf {
+    item_dir(path, cache).join(format!("{:016x}", fnv(stamp.as_bytes())))
+}
+
+/// What `doc` saved in `dir`, if it finished there.
+fn load(dir: &Path) -> Option<Saved> {
+    serde_json::from_slice(&fs::read(dir.join("parts.json")).ok()?).ok()
+}
+
+fn generic(kind: Kind) -> String {
+    match kind {
+        Kind::Image => "image-x-generic",
+        Kind::Video => "video-x-generic",
+        _ => "audio-x-generic",
+    }
+    .into()
 }
 
 /// FNV-1a: a hash that stays the same across Rust versions, for cache folder names.
@@ -160,48 +209,52 @@ fn at(t: f32, t_end: Option<f32>) -> Locator {
 /// The slow part of `doc`; `complete` is false when a tool failed, so nothing is saved.
 fn build(kind: Kind, path: &Path, home: &Path, dir: &Path) -> (Saved, bool) {
     let info = probe(path);
+    let duration = info["format"]["duration"].as_str().and_then(|d| d.parse::<f32>().ok());
+    // With no duration (some WebM recordings), guess one from the size at 128 kbit/s.
+    let secs = duration.unwrap_or_else(|| fs::metadata(path).map_or(0.0, |m| m.len() as f32 / 16_000.0));
+    let limit = Duration::from_secs_f32(GRACE + 3.0 * secs);
     let tag = |key: &str| tags(&info).find(|(k, _)| k == key).map(|(_, v)| v);
     let title = tag("title").unwrap_or_else(|| path.file_name().unwrap_or_default().to_string_lossy().into_owned());
-    let mut s = Saved { artist: tag("artist"), ..Saved::default() };
+    let mut s = Saved { icon: generic(kind), artist: tag("artist"), ..Saved::default() };
     s.names = ["title", "artist", "album"].into_iter().filter_map(tag).collect();
     s.names.dedup();
-    let duration = info["format"]["duration"].as_str().and_then(|d| d.parse::<f32>().ok());
     let has = |kind: &str| info["streams"].as_array().is_some_and(|a| a.iter().any(|s| s["codec_type"] == kind));
     let mut complete = true;
     match kind {
         Kind::Image => {
             let image = dir.join("f0001.jpg");
-            complete = photo(path, &image);
-            s.icon = if complete { thumb(&image).display().to_string() } else { "image-x-generic".into() };
+            complete = photo(path, &image, limit);
             if complete {
+                s.icon = thumb(&image).display().to_string();
                 s.parts.push(Piece { image: Some(image), ..Piece::default() });
             }
             if wants_ocr(path, home)
-                && let Some(text) = ocr(path)
+                && let Some(text) = ocr(path, limit)
             {
                 s.parts.push(Piece { embed: Some(doc_text(&title, cut(&text, EMBED_CHARS))), text, ..Piece::default() });
             }
         }
         Kind::Video => {
-            let frames = if has("video") { frames(path, dir, duration.unwrap_or(0.0)) } else { Some(Vec::new()) };
+            let frames = if has("video") { frames(path, dir, duration.unwrap_or(0.0), limit) } else { Some(Vec::new()) };
             complete = frames.is_some();
             let frames = frames.unwrap_or_default();
-            s.icon = frames.first().map_or_else(|| "video-x-generic".into(), |f| thumb(&f.0).display().to_string());
+            if let Some((first, _)) = frames.first() {
+                s.icon = thumb(first).display().to_string();
+            }
             for (i, (image, t)) in frames.iter().enumerate() {
                 let end = frames.get(i + 1).map(|f| f.1).or(duration).filter(|e| e > t);
                 s.parts.push(Piece { image: Some(image.clone()), locator: at(*t, end), ..Piece::default() });
             }
             if has("audio") {
-                let words = transcript(path, home, dir, &title);
+                let words = transcript(path, home, dir, &title, limit);
                 complete &= words.is_some();
                 s.parts.extend(words.unwrap_or_default());
             }
         }
         _ => {
-            s.icon = "audio-x-generic".into();
             let lines = lyrics(path, &info);
             if lines.is_empty() {
-                let words = transcript(path, home, dir, &title);
+                let words = transcript(path, home, dir, &title, limit);
                 complete = words.is_some();
                 s.parts = words.unwrap_or_default();
             } else {
@@ -212,10 +265,12 @@ fn build(kind: Kind, path: &Path, home: &Path, dir: &Path) -> (Saved, bool) {
     (s, complete)
 }
 
-/// Run a tool at the lowest CPU priority, so indexing never slows down the desktop or a search.
-fn run(cmd: &mut Command) -> Option<Output> {
+/// Run a tool at the lowest CPU priority, so indexing never slows down the desktop or a
+/// search. Past `limit` it counts as hung: its process group (it and its children) is killed.
+fn run(cmd: &mut Command, limit: Duration) -> Option<Output> {
     unsafe extern "C" {
         fn nice(inc: i32) -> i32;
+        fn kill(pid: i32, sig: i32) -> i32;
     }
     // SAFETY: nice(2) is async-signal-safe, so it may run between fork and exec.
     unsafe {
@@ -224,13 +279,26 @@ fn run(cmd: &mut Command) -> Option<Output> {
             Ok(())
         });
     }
-    let out = cmd.stdin(Stdio::null()).output().ok()?;
-    out.status.success().then_some(out)
+    let child = cmd.process_group(0).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().ok()?;
+    let (group, tool) = (child.id() as i32, cmd.get_program().to_owned());
+    let (done, wait) = mpsc::channel::<()>();
+    let watchdog = std::thread::spawn(move || {
+        if wait.recv_timeout(limit) == Err(mpsc::RecvTimeoutError::Timeout) {
+            eprintln!("ss-media: {} hung for {} s, killed", tool.display(), limit.as_secs());
+            // SAFETY: kill(2) touches no memory. The group is the one made above; its leader is
+            // reaped only after every pipe closes, so the id cannot have been reused.
+            unsafe { kill(-group, 9) };
+        }
+    });
+    let out = child.wait_with_output(); // returns once every process holding the pipes is gone
+    drop(done);
+    let _ = watchdog.join();
+    out.ok().filter(|o| o.status.success())
 }
 
 /// ffprobe's view of the file: duration, streams, tags.
 fn probe(path: &Path) -> Value {
-    run(Command::new("ffprobe").args(["-v", "error", "-of", "json", "-show_format", "-show_streams"]).arg(path))
+    run(Command::new("ffprobe").args(["-v", "error", "-of", "json", "-show_format", "-show_streams"]).arg(path), Duration::from_secs_f32(GRACE))
         .and_then(|o| serde_json::from_slice(&o.stdout).ok())
         .unwrap_or(Value::Null)
 }
@@ -247,7 +315,7 @@ fn tags(info: &Value) -> impl Iterator<Item = (String, String)> {
 }
 
 /// The picture scaled to at most 448 px for the model, and its 160 px thumbnail.
-fn photo(path: &Path, image: &Path) -> bool {
+fn photo(path: &Path, image: &Path, limit: Duration) -> bool {
     run(Command::new("ffmpeg")
         .args(["-v", "error", "-y", "-i"])
         .arg(path)
@@ -255,7 +323,9 @@ fn photo(path: &Path, image: &Path) -> bool {
         .args(["-map", "[a]", "-frames:v", "1", "-q:v", "3"])
         .arg(image)
         .args(["-map", "[c]", "-frames:v", "1", "-q:v", "5"])
-        .arg(thumb(image)))
+        .arg(thumb(image)),
+        limit,
+    )
     .is_some()
 }
 
@@ -273,8 +343,8 @@ fn wants_ocr(path: &Path, home: &Path) -> bool {
 }
 
 /// Text that tesseract finds, when it looks like real words rather than noise.
-fn ocr(path: &Path) -> Option<String> {
-    let out = run(Command::new("tesseract").arg(path).args(["stdout", "--psm", "3"]))?;
+fn ocr(path: &Path, limit: Duration) -> Option<String> {
+    let out = run(Command::new("tesseract").arg(path).args(["stdout", "--psm", "3"]), limit)?;
     let text = String::from_utf8_lossy(&out.stdout).split_whitespace().collect::<Vec<_>>().join(" ");
     let words = text.split(' ').filter(|w| w.chars().filter(|c| c.is_alphabetic()).count() >= 3).count();
     (words >= 3).then_some(text)
@@ -282,7 +352,7 @@ fn ocr(path: &Path) -> Option<String> {
 
 /// Video frames at scene changes and at least every 4 s (sparser past 20 minutes: at
 /// most ~300 frames), 448 px, each with its 160 px thumbnail; with their times.
-fn frames(path: &Path, dir: &Path, duration: f32) -> Option<Vec<(PathBuf, f32)>> {
+fn frames(path: &Path, dir: &Path, duration: f32, limit: Duration) -> Option<Vec<(PathBuf, f32)>> {
     let gap = (duration / 300.0).max(4.0);
     let select = format!("select='isnan(prev_selected_t)+gte(t-prev_selected_t,{gap})+gt(scene,0.3)*gte(t-prev_selected_t,1)'");
     let out = run(Command::new("ffmpeg")
@@ -292,7 +362,9 @@ fn frames(path: &Path, dir: &Path, duration: f32) -> Option<Vec<(PathBuf, f32)>>
         .args(["-map", "[a]", "-fps_mode", "vfr", "-q:v", "3"])
         .arg(dir.join("f%04d.jpg"))
         .args(["-map", "[c]", "-fps_mode", "vfr", "-q:v", "5"])
-        .arg(dir.join("t%04d.jpg")))?;
+        .arg(dir.join("t%04d.jpg")),
+        limit,
+    )?;
     let log = String::from_utf8_lossy(&out.stderr);
     let times = log
         .lines()
@@ -310,10 +382,10 @@ fn whisper(home: &Path) -> Option<[PathBuf; 3]> {
 
 /// The spoken words as ~15 s windows: text parts with times, every word in the text.
 /// None when a tool failed; empty when there is no speech or no speech to text.
-fn transcript(path: &Path, home: &Path, dir: &Path, title: &str) -> Option<Vec<Piece>> {
+fn transcript(path: &Path, home: &Path, dir: &Path, title: &str, limit: Duration) -> Option<Vec<Piece>> {
     let Some([cli, model, vad]) = whisper(home) else { return Some(Vec::new()) };
     let (wav, out) = (dir.join("audio.wav"), dir.join("audio"));
-    run(Command::new("ffmpeg").args(["-v", "error", "-y", "-i"]).arg(path).args(["-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le"]).arg(&wav))?;
+    run(Command::new("ffmpeg").args(["-v", "error", "-y", "-i"]).arg(path).args(["-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le"]).arg(&wav), limit)?;
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get().min(4)).to_string();
     // A low voice threshold keeps sung words; the detector still skips plain music, where
     // whisper would otherwise invent text. Greedy decoding: 2x faster, same words here.
@@ -325,7 +397,9 @@ fn transcript(path: &Path, home: &Path, dir: &Path, title: &str) -> Option<Vec<P
         .args(["-t", &threads, "-l", "auto", "-bs", "1", "-bo", "1", "-sns", "-np", "-oj", "--vad", "-vt", "0.1", "-vm"])
         .arg(&vad)
         .arg("-of")
-        .arg(&out));
+        .arg(&out),
+        limit,
+    );
     let json = fs::read(out.with_extension("json"));
     let _ = (fs::remove_file(&wav), fs::remove_file(out.with_extension("json")));
     done?;
