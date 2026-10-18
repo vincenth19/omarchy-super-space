@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 ss-core.workspace = true
-anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["alloc"] }
+chrono-tz = { version = "0.10", default-features = false }

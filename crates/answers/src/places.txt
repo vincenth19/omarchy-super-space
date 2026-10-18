@@ -1,0 +1,220 @@
+Australia/Sydney: Australia, NSW, New South Wales, Canberra, ACT, Newcastle NSW, Wollongong, Central Coast, Blue Mountains, Byron Bay, AET
+Australia/Melbourne: Victoria, VIC, Geelong, Ballarat, Bendigo
+Australia/Brisbane: Queensland, QLD, Gold Coast, Sunshine Coast, Townsville, Cairns, Toowoomba, Mackay, Rockhampton, Bundaberg
+Australia/Adelaide: South Australia, SA
+Australia/Perth: Western Australia, WA, Fremantle
+Australia/Darwin: Northern Territory, NT, Alice Springs
+Australia/Hobart: Tasmania, TAS, Launceston
+Pacific/Auckland: New Zealand, NZ, Aotearoa, Wellington, Christchurch, Hamilton NZ, Dunedin, Queenstown, Tauranga, Rotorua
+Asia/Jakarta: Indonesia, WIB, Java, Jawa, Sumatra, Bandung, Surabaya, Semarang, Medan, Palembang, Yogyakarta, Jogja, Jogjakarta, Bogor, Depok, Tangerang, Bekasi, Malang, Solo, Surakarta, Padang, Pekanbaru, Batam, Jambi, Lampung, Bandar Lampung, Serang, Cirebon, Tasikmalaya, Banda Aceh, Aceh
+Asia/Makassar: Bali, Denpasar, Ubud, Kuta, Seminyak, Canggu, Lombok, Mataram, Labuan Bajo, Flores, Balikpapan, Samarinda, Banjarmasin, Manado, Kupang, Sulawesi, Ujung Pandang, Nusantara, WITA
+Asia/Jayapura: Papua, Ambon, Maluku, Sorong, Timika, WIT
+Asia/Kuala_Lumpur: Malaysia, KL, Penang, George Town, Johor, Johor Bahru, Ipoh, Malacca, Melaka, Putrajaya, Shah Alam, Petaling Jaya, Langkawi, Kota Kinabalu, Sabah, Sarawak, Kuching
+Asia/Singapore: Singapore, SG
+Asia/Bangkok: Thailand, Phuket, Chiang Mai, Pattaya, Krabi, Koh Samui, Hat Yai
+Asia/Ho_Chi_Minh: Vietnam, Viet Nam, Hanoi, Saigon, HCMC, Ho Chi Minh City, Da Nang, Danang, Hai Phong, Haiphong, Nha Trang, Hue, Can Tho, Hoi An
+Asia/Phnom_Penh: Cambodia, Siem Reap
+Asia/Vientiane: Laos, Luang Prabang
+Asia/Yangon: Myanmar, Burma, Naypyidaw, Naypyitaw, Mandalay, Rangoon
+Asia/Manila: Philippines, Quezon City, Cebu, Davao, Makati, Taguig, Pasig, Boracay
+Asia/Brunei: Brunei, Bandar Seri Begawan
+Asia/Dili: East Timor, Timor Leste, Timor-Leste
+Pacific/Port_Moresby: Papua New Guinea, PNG
+Asia/Shanghai: China, PRC, Beijing, Peking, Guangzhou, Canton, Shenzhen, Chengdu, Chongqing, Tianjin, Wuhan, Hangzhou, Nanjing, Xian, Xi'an, Suzhou, Dongguan, Foshan, Shenyang, Harbin, Qingdao, Dalian, Zhengzhou, Jinan, Changsha, Kunming, Xiamen, Hefei, Fuzhou, Ningbo, Wuxi, Shantou, Nanning, Changchun, Taiyuan, Shijiazhuang, Guiyang, Nanchang, Lanzhou, Lhasa, Tibet, Sanya, Hainan, Zhuhai
+Asia/Hong_Kong: Hong Kong, HK, Kowloon
+Asia/Macau: Macau, Macao
+Asia/Taipei: Taiwan, Kaohsiung, Taichung, Tainan, Hsinchu, Taoyuan
+Asia/Tokyo: Japan, Osaka, Kyoto, Yokohama, Nagoya, Sapporo, Kobe, Fukuoka, Kawasaki, Saitama, Hiroshima, Sendai, Nara, Okinawa, Naha
+Asia/Seoul: South Korea, Korea, Busan, Incheon, Daegu, Daejeon, Gwangju, Ulsan, Suwon, Jeju
+Asia/Pyongyang: North Korea, DPRK
+Asia/Ulaanbaatar: Mongolia, Ulan Bator
+Asia/Kolkata: India, Delhi, New Delhi, Mumbai, Bombay, Bangalore, Bengaluru, Hyderabad, Chennai, Madras, Calcutta, Ahmedabad, Pune, Surat, Jaipur, Lucknow, Kanpur, Nagpur, Indore, Thane, Bhopal, Visakhapatnam, Vizag, Patna, Vadodara, Ghaziabad, Ludhiana, Agra, Nashik, Faridabad, Meerut, Rajkot, Varanasi, Srinagar, Amritsar, Allahabad, Prayagraj, Ranchi, Coimbatore, Kochi, Cochin, Gurgaon, Gurugram, Noida, Chandigarh, Mysore, Mysuru, Goa, Panaji, Thiruvananthapuram, Trivandrum, Madurai, Guwahati, Bhubaneswar, Dehradun, Kerala
+Asia/Karachi: Pakistan, Islamabad, Lahore, Faisalabad, Rawalpindi, Multan, Peshawar, Quetta
+Asia/Dhaka: Bangladesh, Dacca, Chittagong, Chattogram, Khulna, Sylhet
+Asia/Kathmandu: Nepal, Pokhara
+Asia/Thimphu: Bhutan
+Asia/Colombo: Sri Lanka, Ceylon, Kandy, Sri Jayawardenepura Kotte
+Indian/Maldives: Maldives, Male
+Asia/Kabul: Afghanistan, Kandahar, Herat
+Asia/Tehran: Iran, Persia, Mashhad, Isfahan, Tabriz, Shiraz, Karaj, Qom
+Asia/Baghdad: Iraq, Basra, Mosul, Erbil
+Asia/Riyadh: Saudi Arabia, Saudi, KSA, Jeddah, Mecca, Makkah, Medina, Dammam
+Asia/Dubai: UAE, United Arab Emirates, Emirates, Abu Dhabi, Sharjah, Ajman
+Asia/Qatar: Qatar, Doha
+Asia/Kuwait: Kuwait, Kuwait City
+Asia/Bahrain: Bahrain, Manama
+Asia/Muscat: Oman
+Asia/Aden: Yemen, Sanaa, Sana'a
+Asia/Jerusalem: Israel, Tel Aviv, Haifa
+Asia/Hebron: Palestine, Ramallah, West Bank
+Asia/Amman: Jordan
+Asia/Beirut: Lebanon
+Asia/Damascus: Syria, Aleppo
+Europe/Istanbul: Turkey, Turkiye, Türkiye, Ankara, Izmir, Bursa, Antalya, Adana, Konya, Bodrum
+Asia/Nicosia: Cyprus, Limassol, Larnaca, Paphos
+Asia/Tbilisi: Georgia country, Batumi
+Asia/Yerevan: Armenia
+Asia/Baku: Azerbaijan
+Asia/Almaty: Kazakhstan, Astana, Nur-Sultan, Shymkent
+Asia/Tashkent: Uzbekistan, Samarkand
+Asia/Bishkek: Kyrgyzstan
+Asia/Dushanbe: Tajikistan
+Asia/Ashgabat: Turkmenistan
+Europe/Moscow: Russia, Saint Petersburg, St Petersburg, Petersburg, Kazan, Nizhny Novgorod, Sochi
+Asia/Yekaterinburg: Ekaterinburg, Chelyabinsk, Perm
+Europe/London: UK, United Kingdom, Britain, Great Britain, England, Scotland, Wales, Northern Ireland, Edinburgh, Cardiff, Manchester, Birmingham, Liverpool, Leeds, Glasgow, Sheffield, Bristol, Newcastle, Leicester, Nottingham, Oxford, Cambridge, Brighton, Southampton, Coventry, Aberdeen, York, Bath, Reading
+Europe/Dublin: Ireland, Eire, Cork, Galway, Limerick
+Europe/Paris: France, Marseille, Lyon, Toulouse, Nice, Nantes, Strasbourg, Montpellier, Bordeaux, Lille, Rennes, Cannes
+Europe/Berlin: Germany, Deutschland, Munich, München, Hamburg, Cologne, Köln, Frankfurt, Stuttgart, Düsseldorf, Dusseldorf, Dortmund, Essen, Leipzig, Bremen, Dresden, Hanover, Hannover, Nuremberg, Nürnberg, Bonn, Heidelberg
+Europe/Madrid: Spain, España, Barcelona, Valencia, Seville, Sevilla, Zaragoza, Malaga, Málaga, Bilbao, Ibiza, Mallorca, Majorca, Palma
+Atlantic/Canary: Canary Islands, Tenerife, Gran Canaria, Las Palmas
+Europe/Lisbon: Portugal, Porto, Oporto, Faro, Algarve
+Europe/Rome: Italy, Italia, Milan, Milano, Naples, Napoli, Turin, Torino, Palermo, Genoa, Bologna, Florence, Firenze, Venice, Venezia, Verona, Bari, Catania, Vatican City, Sicily, Sardinia
+Europe/Amsterdam: Netherlands, The Netherlands, Holland, Rotterdam, The Hague, Den Haag, Utrecht, Eindhoven
+Europe/Brussels: Belgium, Antwerp, Ghent, Bruges, Liege
+Europe/Zurich: Switzerland, Swiss, Bern, Berne, Geneva, Basel, Lausanne, Lugano
+Europe/Vaduz: Liechtenstein
+Europe/Vienna: Austria, Salzburg, Innsbruck, Graz, Linz
+Europe/Prague: Czechia, Czech Republic, Brno
+Europe/Bratislava: Slovakia, Kosice
+Europe/Warsaw: Poland, Krakow, Kraków, Cracow, Lodz, Łódź, Wroclaw, Wrocław, Poznan, Gdansk, Gdańsk
+Europe/Budapest: Hungary, Debrecen
+Europe/Ljubljana: Slovenia
+Europe/Zagreb: Croatia, Split, Dubrovnik
+Europe/Belgrade: Serbia, Novi Sad, Kosovo, Pristina, Prishtina
+Europe/Sarajevo: Bosnia, Bosnia and Herzegovina
+Europe/Podgorica: Montenegro
+Europe/Skopje: North Macedonia, Macedonia
+Europe/Tirane: Albania, Tirana
+Europe/Bucharest: Romania, Cluj, Cluj-Napoca, Timisoara, Iasi
+Europe/Sofia: Bulgaria, Plovdiv, Varna
+Europe/Chisinau: Moldova
+Europe/Athens: Greece, Thessaloniki, Crete, Heraklion, Santorini, Mykonos, Rhodes, Corfu
+Europe/Kyiv: Ukraine, Kiev, Kyiv, Kharkiv, Kharkov, Odesa, Odessa, Lviv, Dnipro
+Europe/Minsk: Belarus
+Europe/Helsinki: Finland, Espoo, Tampere, Turku
+Europe/Tallinn: Estonia, Tartu
+Europe/Riga: Latvia
+Europe/Vilnius: Lithuania, Kaunas
+Europe/Stockholm: Sweden, Gothenburg, Göteborg, Malmö, Malmo, Uppsala
+Europe/Oslo: Norway, Bergen, Trondheim, Stavanger
+Europe/Copenhagen: Denmark, Aarhus, Odense
+Atlantic/Reykjavik: Iceland
+Atlantic/Faroe: Faroe Islands
+Europe/Malta: Malta, Valletta
+Europe/Monaco: Monaco, Monte Carlo
+Europe/Andorra: Andorra
+Africa/Cairo: Egypt, Alexandria, Giza, Luxor, Sharm El Sheikh, Hurghada
+Africa/Lagos: Nigeria, Abuja, Kano, Ibadan, Port Harcourt, Benin City
+Africa/Johannesburg: South Africa, Pretoria, Cape Town, Durban, Soweto, Port Elizabeth, Gqeberha, Joburg
+Africa/Nairobi: Kenya, Mombasa, Kisumu
+Africa/Addis_Ababa: Ethiopia
+Africa/Dar_es_Salaam: Tanzania, Dodoma, Zanzibar, Arusha
+Africa/Kampala: Uganda
+Africa/Kigali: Rwanda
+Africa/Bujumbura: Burundi, Gitega
+Africa/Mogadishu: Somalia
+Africa/Djibouti: Djibouti
+Africa/Asmara: Eritrea
+Africa/Khartoum: Sudan, Omdurman
+Africa/Juba: South Sudan
+Africa/Kinshasa: DR Congo, DRC, Democratic Republic of the Congo, Congo
+Africa/Brazzaville: Republic of the Congo
+Africa/Luanda: Angola
+Africa/Lusaka: Zambia
+Africa/Harare: Zimbabwe, Bulawayo
+Africa/Gaborone: Botswana
+Africa/Windhoek: Namibia
+Africa/Maputo: Mozambique
+Africa/Blantyre: Malawi, Lilongwe
+Africa/Maseru: Lesotho
+Africa/Mbabane: Eswatini, Swaziland
+Indian/Antananarivo: Madagascar
+Indian/Mauritius: Mauritius, Port Louis
+Indian/Mahe: Seychelles
+Indian/Reunion: Reunion, Réunion
+Indian/Comoro: Comoros, Moroni
+Africa/Casablanca: Morocco, Rabat, Marrakech, Marrakesh, Fes, Fez, Tangier, Agadir
+Africa/Algiers: Algeria, Oran
+Africa/Tunis: Tunisia
+Africa/Tripoli: Libya, Benghazi
+Africa/Accra: Ghana, Kumasi
+Africa/Abidjan: Ivory Coast, Côte d'Ivoire, Cote d'Ivoire, Yamoussoukro
+Africa/Dakar: Senegal
+Africa/Bamako: Mali
+Africa/Ouagadougou: Burkina Faso
+Africa/Niamey: Niger
+Africa/Ndjamena: Chad, N'Djamena
+Africa/Douala: Cameroon, Yaoundé, Yaounde
+Africa/Libreville: Gabon
+Africa/Malabo: Equatorial Guinea
+Africa/Bangui: Central African Republic
+Africa/Conakry: Guinea
+Africa/Bissau: Guinea-Bissau
+Africa/Freetown: Sierra Leone
+Africa/Monrovia: Liberia
+Africa/Lome: Togo, Lomé
+Africa/Porto-Novo: Benin, Cotonou
+Africa/Nouakchott: Mauritania
+Africa/Banjul: Gambia, The Gambia
+Atlantic/Cape_Verde: Cape Verde, Cabo Verde, Praia
+Africa/Sao_Tome: São Tomé, Sao Tome and Principe
+America/New_York: USA, US, United States, United States of America, America, ET, Eastern, Eastern Time, NYC, NY, Washington DC, Washington, DC, Boston, Philadelphia, Miami, Atlanta, Baltimore, Charlotte, Orlando, Tampa, Pittsburgh, Cleveland, Columbus, Cincinnati, Buffalo, Raleigh, Richmond, Jacksonville, Virginia Beach, Newark, Jersey City, Brooklyn, Manhattan, Queens, Bronx, New Jersey, Florida, Georgia, Massachusetts, Pennsylvania, Ohio, Virginia, North Carolina, South Carolina, Maryland, Connecticut, Maine, Vermont, New Hampshire, Rhode Island, Delaware, West Virginia, Michigan, Indiana, New York State
+America/Chicago: CT, Central, Central Time, Houston, Dallas, San Antonio, Austin, Fort Worth, Memphis, Nashville, New Orleans, Milwaukee, Kansas City, Oklahoma City, Omaha, Minneapolis, St Louis, Saint Louis, Tulsa, Texas, Illinois, Tennessee, Louisiana, Wisconsin, Minnesota, Iowa, Missouri, Kansas, Oklahoma, Nebraska, Arkansas, Mississippi, Alabama, Kentucky
+America/Denver: MT, Mountain, Mountain Time, Colorado, Utah, Salt Lake City, Albuquerque, El Paso, New Mexico, Wyoming, Montana, Idaho
+America/Phoenix: Arizona, Tucson, Mesa, Scottsdale
+America/Los_Angeles: PT, Pacific, Pacific Time, LA, L.A., San Francisco, SF, San Diego, San Jose, Seattle, Portland, Las Vegas, Vegas, Sacramento, Oakland, Fresno, Long Beach, Hollywood, Silicon Valley, Palo Alto, Cupertino, Mountain View, California, Washington State, Oregon, Nevada
+America/Anchorage: Alaska
+Pacific/Honolulu: Hawaii
+America/Puerto_Rico: Puerto Rico, San Juan
+America/Toronto: Canada, Ottawa, Montreal, Montréal, Quebec, Québec, Quebec City, Ontario, Mississauga, Brampton, Hamilton, Kitchener, Waterloo
+America/Vancouver: British Columbia, BC, Surrey, Burnaby
+America/Edmonton: Alberta, Calgary
+America/Winnipeg: Manitoba
+America/Regina: Saskatchewan, Saskatoon
+America/Halifax: Nova Scotia, New Brunswick
+America/St_Johns: Newfoundland
+America/Mexico_City: Mexico, CDMX, Guadalajara, Monterrey, Puebla, Leon, León, Queretaro, Toluca
+America/Cancun: Cancún, Playa del Carmen, Tulum
+America/Guatemala: Guatemala, Guatemala City
+America/El_Salvador: El Salvador, San Salvador
+America/Tegucigalpa: Honduras, San Pedro Sula
+America/Managua: Nicaragua
+America/Costa_Rica: Costa Rica
+America/Panama: Panama, Panama City
+America/Belize: Belize, Belmopan
+America/Havana: Cuba
+America/Jamaica: Jamaica, Kingston
+America/Port-au-Prince: Haiti
+America/Santo_Domingo: Dominican Republic, Punta Cana
+America/Nassau: Bahamas
+America/Barbados: Barbados, Bridgetown
+America/Port_of_Spain: Trinidad, Trinidad and Tobago
+America/Bogota: Colombia, Bogotá, Medellin, Medellín, Cali, Barranquilla, Cartagena
+America/Caracas: Venezuela, Maracaibo
+America/Lima: Peru, Cusco, Cuzco, Arequipa
+America/Guayaquil: Ecuador, Quito
+America/La_Paz: Bolivia, Sucre, Santa Cruz
+America/Santiago: Chile, Valparaiso
+America/Argentina/Buenos_Aires: Argentina, Cordoba, Córdoba, Rosario, Mendoza
+America/Montevideo: Uruguay
+America/Asuncion: Paraguay, Asunción
+America/Guyana: Guyana, Georgetown
+America/Paramaribo: Suriname
+America/Sao_Paulo: Brazil, Brasil, Brasilia, Brasília, São Paulo, Rio, Rio de Janeiro, Salvador, Belo Horizonte, Curitiba, Porto Alegre, Recife, Goiania, Campinas
+America/Nuuk: Greenland
+Pacific/Fiji: Fiji, Suva
+Pacific/Guam: Guam
+Pacific/Tongatapu: Tonga, Nuku'alofa
+Pacific/Apia: Samoa
+Pacific/Efate: Vanuatu, Port Vila
+Pacific/Guadalcanal: Solomon Islands, Honiara
+Pacific/Noumea: New Caledonia
+Pacific/Tahiti: Tahiti, French Polynesia, Papeete
+Pacific/Tarawa: Kiribati
+Pacific/Majuro: Marshall Islands
+Pacific/Palau: Palau
+Pacific/Nauru: Nauru
+Pacific/Funafuti: Tuvalu
+Pacific/Pohnpei: Micronesia
+Pacific/Rarotonga: Cook Islands
