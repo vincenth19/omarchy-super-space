@@ -272,7 +272,7 @@ mod tests {
 
     #[test]
     fn window_classes_to_apps() {
-        let entry = |id: &str, name: &str, class: &str, exec: &str| apps::Entry { id: id.into(), name: name.into(), generic: String::new(), comment: String::new(), keywords: Vec::new(), icon: id.to_lowercase(), wm_class: class.into(), exec: exec.into() };
+        let entry = |id: &str, name: &str, class: &str, exec: &str| apps::Entry { id: id.into(), name: name.into(), generic: String::new(), comment: String::new(), keywords: Vec::new(), icon: id.to_lowercase(), wm_class: class.into(), exec: exec.into(), categories: String::new() };
         let entries = [entry("chromium", "Chromium", "chromium", "/usr/bin/chromium %U"), entry("X", "X", "", "omarchy-launch-webapp https://x.com/"), entry("libreoffice-writer", "LibreOffice Writer", "libreoffice-writer", "")];
         assert_eq!(app_for("chromium", &entries), ("Chromium".into(), "chromium".into()));
         assert_eq!(app_for("chrome-x.com__-Default", &entries), ("X".into(), "x".into()));

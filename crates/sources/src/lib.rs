@@ -64,10 +64,14 @@ fn ago(secs: i64) -> String {
     }
 }
 
-/// One text part embedded as `doc_text(title, body)`, and the stamp of that text.
+/// One text part embedded as `doc_text(title, body)`, and the stamp of that
+/// text. With no body the part is keywords only: on the Pi a short title
+/// alone ("X") embedded near short queries such as "volume" (0.718), and the
+/// name still matches it.
 fn text_part(title: &str, body: String) -> (String, Vec<Part>) {
-    let embed = doc_text(title, &body);
-    (sha1(&embed), vec![Part { text: body, locator: Locator::default(), embed: Embed::Text(embed) }])
+    let embed = if body.is_empty() { Embed::None } else { Embed::Text(doc_text(title, &body)) };
+    let stamp = sha1(if let Embed::Text(t) = &embed { t } else { title });
+    (stamp, vec![Part { text: body, locator: Locator::default(), embed }])
 }
 
 fn read_json(path: &Path) -> serde_json::Value {

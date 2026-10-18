@@ -14,6 +14,8 @@ pub(crate) struct Entry {
     pub icon: String,
     pub wm_class: String,
     pub exec: String,
+    /// Menu categories without X- extensions, e.g. "Graphics, Viewer".
+    pub categories: String,
 }
 
 pub fn apps() -> Vec<Doc> {
@@ -21,12 +23,18 @@ pub fn apps() -> Vec<Doc> {
 }
 
 fn doc(e: Entry) -> Doc {
-    let body = [e.generic.clone(), e.comment.clone(), e.keywords.join(", ")]
+    // A Comment that only repeats the name says nothing.
+    let comment = if e.comment == e.name { String::new() } else { e.comment };
+    let made = made_as(&e.exec);
+    let body = [e.generic.clone(), comment.clone(), made.clone(), e.keywords.join(", ")]
         .into_iter()
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
         .join(". ");
-    let (stamp, parts) = text_part(&e.name, body);
+    // With nothing else, the categories still say what it is: on the Pi, Image
+    // Viewer embedded as "Graphics, Viewer" keeps "photo viewer" (0.743) and sits
+    // further from other queries (best 0.656) than its title alone (0.692).
+    let (stamp, parts) = text_part(&e.name, if body.is_empty() { e.categories } else { body });
     let mut names = e.keywords;
     if !e.generic.is_empty() {
         names.insert(0, e.generic.clone());
@@ -34,7 +42,7 @@ fn doc(e: Entry) -> Doc {
     Doc {
         key: format!("app:{}", e.id),
         kind: Kind::App,
-        subtitle: if e.comment.is_empty() { e.generic } else { e.comment },
+        subtitle: [comment, e.generic, made].into_iter().find(|s| !s.is_empty()).unwrap_or_default(),
         icon: if e.icon.is_empty() { "application-x-executable".into() } else { e.icon },
         action: Action::Launch { desktop_id: format!("{}.desktop", e.id) },
         title: e.name,
@@ -42,6 +50,20 @@ fn doc(e: Entry) -> Doc {
         names,
         parts,
     }
+}
+
+/// What an Exec line starts, told apart the way Omarchy's Remove menu does:
+/// web apps run omarchy-launch-webapp or a webapp handler, terminal apps run
+/// a terminal with -e. The site ("x.com"), "Web app", "Terminal app" or
+/// nothing. Measured on the Pi: the bare site embeds closer to what the app
+/// is for than "Web app for x.com" ("watch videos": YouTube 0.707 vs 0.612).
+fn made_as(exec: &str) -> String {
+    if exec.contains("omarchy-launch-webapp") || exec.contains("omarchy-webapp-handler") {
+        let host = exec.split(['"', '\'', ' ']).find_map(|w| w.split_once("://")).and_then(|(_, rest)| rest.split('/').next());
+        return host.filter(|h| !h.is_empty()).map_or("Web app".into(), |h| h.trim_start_matches("www.").into());
+    }
+    let terminal = ["$TERMINAL", "xdg-terminal-exec"].iter().any(|t| exec.split_once(t).is_some_and(|(_, rest)| rest.contains("-e")));
+    if terminal { "Terminal app".into() } else { String::new() }
 }
 
 /// Application folders, most important first: the user's copy of an entry
@@ -111,6 +133,7 @@ fn parse(id: &str, text: &str, desktops: &str) -> Option<Entry> {
         icon: get("Icon"),
         wm_class: get("StartupWMClass"),
         exec: get("Exec"),
+        categories: get("Categories").split(';').filter(|c| !c.is_empty() && !c.starts_with("X-")).collect::<Vec<_>>().join(", "),
     })
 }
 
@@ -180,5 +203,25 @@ mod tests {
         let ss_core::Embed::Text(t) = &d.parts[0].embed else { panic!() };
         assert_eq!(t, "title: Chromium | text: Web Browser. Access the Internet. browser, web");
         assert_eq!(d.stamp, crate::sha1(t));
+    }
+
+    #[test]
+    fn web_and_terminal_apps_say_what_they_are() {
+        let app = |exec: &str, comment: &str| doc(parse("X", &format!("[Desktop Entry]\nName=X\nComment={comment}\nExec={exec}\n"), "").unwrap());
+        let x = app("omarchy-launch-webapp https://www.x.com/home", "");
+        assert_eq!(x.subtitle, "x.com");
+        let ss_core::Embed::Text(t) = &x.parts[0].embed else { panic!() };
+        assert_eq!(t, "title: X | text: x.com");
+        // Tailscale's Comment is its name.
+        assert_eq!(app("omarchy-launch-webapp \"https://login.tailscale.com/admin\"", "X").subtitle, "login.tailscale.com");
+        assert_eq!(app("omarchy-webapp-handler-hey %u", "").subtitle, "Web app");
+        assert_eq!(app("xdg-terminal-exec --app-id=TUI.float -e bash -c \"dua i /\"", "").subtitle, "Terminal app");
+        let imv = doc(parse("imv", "[Desktop Entry]\nName=Image Viewer\nExec=imv %F\nCategories=Graphics;Viewer;X-Red-Hat-Base;\n", "").unwrap());
+        let ss_core::Embed::Text(t) = &imv.parts[0].embed else { panic!() };
+        assert_eq!(t, "title: Image Viewer | text: Graphics, Viewer");
+        // Nothing beyond the title: keywords only, with a stamp unlike the old title-only embedding.
+        let bare = app("imv %F", "");
+        assert!(matches!(bare.parts[0].embed, ss_core::Embed::None));
+        assert_eq!((bare.subtitle.as_str(), bare.stamp.as_str()), ("", crate::sha1("X").as_str()));
     }
 }

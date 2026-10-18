@@ -4,8 +4,12 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 use ss_core::{Action, Doc, Kind};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::io::{BufRead, BufReader};
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 /// Nerd Font cog, for rows with no glyph of their own (menu rows carry Omarchy's).
 const GEAR: &str = "\u{f013}";
@@ -13,6 +17,38 @@ const GEAR: &str = "\u{f013}";
 /// Commands outside the menu are offered only when their summary starts with
 /// one of these: things a person runs, not plumbing that prints for scripts.
 const VERBS: &[&str] = &["Toggle", "Launch", "Open", "Restart", "Switch", "Cycle", "Lock", "Select and set", "Show the current"];
+
+/// How long all the menu's `when:` checks together may take. All 152 take
+/// 1.1-1.4 s on the Pi; a check cut off hides its row until the next read.
+const CHECKS: Duration = Duration::from_secs(4);
+
+/// Everyday words for rows people look for by what they want rather than by
+/// Omarchy's label, by row id. Each names something the row really does
+/// (Omarchy's summaries, panel descriptions and input.lua comments).
+const PHRASES: &[(&str, &str)] = &[
+    ("style.theme", "change the theme, colour scheme, color scheme, dark mode, light mode"),
+    ("style.background", "change the wallpaper, desktop background, desktop picture"),
+    ("omarchy-theme-bg-next", "next wallpaper"),
+    ("trigger.toggle.nightlight", "night light, blue light filter, night mode, night shift, make the screen warmer"),
+    ("omarchy.network", "wifi, wi-fi, wireless network, connect to wifi, internet connection"),
+    ("update.hardware.wifi", "restart wifi, wifi not working"),
+    ("omarchy.bluetooth", "pair bluetooth device, connect bluetooth headphones"),
+    ("update.hardware.bluetooth", "restart bluetooth, bluetooth not working"),
+    ("omarchy.audio", "volume, turn the volume up or down, sound, speakers, mute the sound, sound output"),
+    ("omarchy-audio-input-mute", "mute the microphone, mic mute"),
+    ("omarchy.monitor", "brightness, screen brightness, dim the screen"),
+    ("trigger.capture.screenshot", "take a screenshot, screen capture, screen grab, print screen"),
+    ("trigger.capture.screenrecord", "record the screen, screen recording, screencast"),
+    ("system.lock", "lock the screen, lock screen, lock the computer"),
+    ("system.shutdown", "shut down, power off, turn off the computer"),
+    ("system.reboot", "restart the computer"),
+    ("system.suspend", "sleep"),
+    ("system.logout", "log out, sign out"),
+    ("system", "power menu, power options"),
+    ("setup.input", "keyboard layout, keyboard language, key repeat, mouse sensitivity, natural scrolling, touchpad"),
+    ("trigger.emoji", "emoji picker, insert an emoji"),
+    ("omarchy-menu-clipboard", "clipboard history, paste history"),
+];
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
@@ -54,7 +90,7 @@ pub fn settings() -> Vec<Doc> {
     let texts: Vec<String> = paths[..2].iter().filter_map(|p| std::fs::read_to_string(p).ok()).collect();
     let items = menu_items(&texts);
     let conds: Vec<(&str, &str)> = items.iter().filter(|(_, i)| !i.when.is_empty()).map(|(id, i)| (id.as_str(), i.when.as_str())).collect();
-    let ok = passing(&conds.iter().map(|c| c.1).collect::<Vec<_>>());
+    let ok = passing(&conds.iter().map(|c| c.1).collect::<Vec<_>>(), CHECKS);
     let failed: HashSet<&str> = conds.iter().enumerate().filter(|(n, _)| !ok.contains(n)).map(|(_, c)| c.0).collect();
     let cmds = commands();
     let summaries: HashMap<&str, &str> = cmds.iter().map(|c| (c.binary.as_str(), c.summary.as_str())).collect();
@@ -62,7 +98,16 @@ pub fn settings() -> Vec<Doc> {
     let mut docs = menu_docs(&items, &failed, &summaries);
     docs.extend(panel_docs(&read_json(&paths[2]), &manifests()));
     docs.extend(command_docs(&cmds, &in_menu));
+    docs.iter_mut().for_each(add_phrases);
     docs
+}
+
+/// A row's PHRASES become names (instant matches) and part of its embedded text.
+fn add_phrases(d: &mut Doc) {
+    let Some(&(_, said)) = PHRASES.iter().find(|(id, _)| d.key.strip_prefix("setting:") == Some(*id)) else { return };
+    d.names.extend(said.split(", ").map(String::from));
+    let body = format!("{}. {said}", d.parts[0].text);
+    (d.stamp, d.parts) = text_part(&d.title, body);
 }
 
 /// Menu items by id, the user's fields laid over the default ones, as Omarchy merges them.
@@ -91,11 +136,25 @@ fn strip_jsonc(raw: &str) -> String {
         .collect()
 }
 
-/// Indexes of the shell conditions that succeed, checked in parallel.
-fn passing(conds: &[&str]) -> HashSet<usize> {
+/// Indexes of the shell conditions that succeed, checked in parallel. A check
+/// still running after `limit` counts as failed, so one that hangs cannot
+/// hold up settings().
+fn passing(conds: &[&str], limit: Duration) -> HashSet<usize> {
     let script: String = conds.iter().enumerate().map(|(i, c)| format!("(\n{c}\n) >/dev/null 2>&1 </dev/null && echo {i} &\n")).collect();
-    let out = sh(&(script + "wait\n")).output().map(|o| o.stdout).unwrap_or_default();
-    String::from_utf8_lossy(&out).lines().filter_map(|l| l.trim().parse().ok()).collect()
+    let mut ok = HashSet::new();
+    let Ok(mut child) = sh(&(script + "wait\n")).stdout(Stdio::piped()).process_group(0).spawn() else { return ok };
+    let (tx, rx) = mpsc::channel();
+    let out = BufReader::new(child.stdout.take().expect("piped"));
+    std::thread::spawn(move || out.lines().map_while(Result::ok).try_for_each(|l| tx.send(l)));
+    let end = Instant::now() + limit;
+    while let Ok(line) = rx.recv_timeout(end.saturating_duration_since(Instant::now())) {
+        ok.extend(line.trim().parse::<usize>());
+    }
+    // bash and every check it started share one process group; bash is not
+    // reaped yet, so the group id cannot belong to anything else.
+    let _ = sh(&format!("kill -KILL -- -{}", child.id())).status();
+    let _ = child.wait();
+    ok
 }
 
 fn sh(script: &str) -> Command {
@@ -294,9 +353,35 @@ mod tests {
     }
 
     #[test]
-    fn conditions_run_in_parallel() {
-        let ok = passing(&["true", "false", "[[ 1 == 1 ]] # comment", "exit 3"]);
-        assert_eq!(ok, [0, 2].into());
+    fn conditions_run_in_parallel_within_a_time_limit() {
+        let marker = format!("ss-sources-hang-{}", std::process::id());
+        let hang = format!("sleep 30 # {marker}");
+        let t = Instant::now();
+        let ok = passing(&["true", "false", "[[ 1 == 1 ]] # comment", "exit 3", &hang, "sleep 0.2"], Duration::from_millis(800));
+        assert_eq!(ok, [0, 2, 5].into());
+        assert!(t.elapsed() < Duration::from_millis(1500), "{:?}", t.elapsed());
+        // The hung check is killed, not left running.
+        let alive = || Command::new("pgrep").args(["-f", &marker]).stdout(Stdio::null()).status().is_ok_and(|s| s.success());
+        for _ in 0..20 {
+            if !alive() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(!alive());
+    }
+
+    #[test]
+    fn everyday_phrases_become_names_and_text() {
+        let mut docs = docs();
+        docs.iter_mut().for_each(add_phrases);
+        let night = &docs[6];
+        assert_eq!(night.names[..3], ["Toggle Night light", "night light", "blue light filter"]);
+        assert!(embed(night).ends_with("Toggle nightlight screen temperature. night light, blue light filter, night mode, night shift, make the screen warmer"), "{}", embed(night));
+        assert_eq!(night.stamp, crate::sha1(embed(night)));
+        assert_eq!(embed(night).strip_prefix("title: Night light | text: "), Some(night.parts[0].text.as_str()));
+        // Rows without phrases keep their text.
+        assert_eq!(embed(&docs[3]), "title: Trigger | text: Trigger. Includes Emoji, Toggle");
     }
 
     #[test]
