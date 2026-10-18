@@ -6,6 +6,8 @@ license.workspace = true
 
 [dependencies]
 ss-core.workspace = true
+ss-media.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["alloc"] }
 quick-xml = "0.38"
 zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 # Only to pick flate2's small pure-Rust inflater for zip.

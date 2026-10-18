@@ -1,7 +1,7 @@
 //! Fixtures are built here: zips for the office formats, a tiny PDF, git repos.
 //! PDF and git checks run only where pdftotext / git exist (the Arch image has both).
 use ss_core::{Action, Embed, Kind, Locator};
-use ss_files::{crawl, doc, roots, wanted};
+use ss_files::{crawl, crawl_dir, doc, roots, wanted_in};
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::Write;
@@ -108,6 +108,7 @@ fn exclusion_rules_and_crawl_agree() {
     let found: BTreeSet<PathBuf> = crawl(&h).into_iter().collect();
     let want: BTreeSet<PathBuf> = keep.iter().map(|(p, _)| h.join(p)).collect();
     assert_eq!(found, want);
+    let wanted = |p: &Path| wanted_in(p, &h);
     for (p, _) in keep {
         assert!(wanted(&h.join(p)), "{p} should be wanted");
     }
@@ -116,6 +117,36 @@ fn exclusion_rules_and_crawl_agree() {
     }
     assert!(!wanted(&docs.join("link.md")) && !wanted(&docs.join("linkdir")));
     assert!(wanted(&docs.join("sub")) && !wanted(&docs.join("cache")) && !wanted(&docs.join("private/deep")));
+    // A new folder gets what crawl finds below it; home's own subfolders are not crawled.
+    let below = |d: &str| -> BTreeSet<PathBuf> { found.iter().filter(|p| p.starts_with(h.join(d))).cloned().collect() };
+    assert_eq!(crawl_dir(&docs, &h).into_iter().collect::<BTreeSet<_>>(), below("Documents"));
+    assert_eq!(crawl_dir(&docs.join("sub"), &h).into_iter().collect::<BTreeSet<_>>(), below("Documents/sub"));
+    assert!(crawl_dir(&h.join("Other"), &h).is_empty() && crawl_dir(&docs.join("cache"), &h).is_empty());
+}
+
+#[test]
+fn home_and_roots_inside_dot_folders() {
+    // A dev home under ~/.cache, an opt-out marker above it, and a Music folder outside it, also under a dot folder.
+    let t = tmp("dothome");
+    let (h, music) = (t.join(".cache/dev/home"), t.join(".data/Music"));
+    put(&t.join(".cache/CACHEDIR.TAG"), "Signature: 8a477f597d28d172789f06886806bc55");
+    put(&h.join(".config/user-dirs.dirs"), format!("XDG_MUSIC_DIR=\"{}\"\n", music.display()));
+    let files = ["Documents/notes.md", "Documents/deep/plan.txt", "top.txt"].map(|p| h.join(p));
+    for f in files.iter().chain([&music.join("lyrics.txt")]) {
+        put(f, "words\n");
+    }
+    put(&h.join("Documents/.hidden/x.md"), "x");
+    for f in &files {
+        assert!(wanted_in(f, &h), "{}", f.display());
+    }
+    assert!(wanted_in(&music.join("lyrics.txt"), &h) && !wanted_in(&h.join("Documents/.hidden/x.md"), &h));
+    let mut want = files.to_vec();
+    want.push(music.join("lyrics.txt"));
+    assert_eq!(crawl(&h).into_iter().collect::<BTreeSet<_>>(), want.into_iter().collect());
+    assert_eq!(crawl_dir(&h.join("Documents/deep"), &h), [h.join("Documents/deep/plan.txt")]);
+    // An opt-out marker in home itself still stops everything.
+    put(&h.join(".noindex"), "");
+    assert!(!wanted_in(&files[0], &h) && crawl(&h).is_empty() && crawl_dir(&h.join("Documents"), &h).is_empty());
 }
 
 #[test]
@@ -134,6 +165,7 @@ fn git_repos_respect_gitignore() {
         ("debug.log", "log\n"),
         ("secret.md", "shh\n"),
         ("notes/todo.md", "untracked but not ignored\n"),
+        ("notes/run.log", "ignored inside a kept folder\n"),
         ("vendor/inner/.gitignore", "skip.md\n"),
         ("vendor/inner/doc.md", "nested repo doc\n"),
         ("vendor/inner/skip.md", "ignored by the nested repo\n"),
@@ -154,9 +186,15 @@ fn git_repos_respect_gitignore() {
     let want: BTreeSet<PathBuf> = ["README.md", "src/main.rs", "notes/todo.md", "vendor/inner/doc.md"].iter().map(|p| repo.join(p)).collect();
     assert_eq!(found, want);
     for (p, _) in files.iter().filter(|(p, _)| !p.ends_with(".gitignore")) {
-        assert_eq!(wanted(&repo.join(p)), want.contains(&repo.join(p)), "wanted({p})");
+        assert_eq!(wanted_in(&repo.join(p), &h), want.contains(&repo.join(p)), "wanted({p})");
     }
-    assert!(!wanted(&repo.join("target")) && wanted(&repo.join("src")));
+    assert!(!wanted_in(&repo.join("target"), &h) && wanted_in(&repo.join("src"), &h));
+    // A folder inside a repo, or holding one, keeps what crawl keeps there.
+    let dir = |d: &str| crawl_dir(&repo.join(d), &h).into_iter().collect::<BTreeSet<_>>();
+    assert_eq!(dir(""), want);
+    assert_eq!(dir("vendor"), BTreeSet::from([repo.join("vendor/inner/doc.md")]));
+    assert_eq!(dir("notes"), BTreeSet::from([repo.join("notes/todo.md")]));
+    assert!(dir("target").is_empty());
     // Source code is found by name only; prose by content.
     assert!(doc(&repo.join("src/main.rs"), &h).unwrap().parts.is_empty());
     assert_eq!(doc(&repo.join("README.md"), &h).unwrap().parts.len(), 1);
@@ -217,8 +255,14 @@ fn size_caps() {
     assert!(doc(&big, &h).unwrap().parts.is_empty());
     let long = h.join("long.md");
     put(&long, "All work and no play makes a dull day.\n".repeat(80_000)); // 3.1 MB
-    let total: usize = doc(&long, &h).unwrap().parts.iter().map(|p| p.text.len()).sum();
+    let d = doc(&long, &h).unwrap();
+    let total: usize = d.parts.iter().map(|p| p.text.len()).sum();
     assert!(total > 1_000_000 && total < 1_200_000, "{total}");
+    // Only the first 160 KB get meaning; every later part is keyword-only.
+    let embedded = |p: &&ss_core::Part| matches!(p.embed, Embed::Text(_));
+    let meaning: usize = d.parts.iter().take_while(embedded).map(|p| p.text.len()).sum();
+    assert!((160_000..161_000).contains(&meaning), "{meaning}");
+    assert!(d.parts.iter().skip_while(embedded).all(|p| matches!(p.embed, Embed::None)));
     // One huge line (a paragraph with no breaks) is cut at spaces.
     put(&long, "word ".repeat(2000));
     let d = doc(&long, &h).unwrap();
@@ -257,6 +301,30 @@ fn xlsx() {
         (loc(None, None, Some("Budget"), Some(1)), "Item | Cost\nFlight to Bali | 450".into()),
         (loc(None, None, Some("Travel"), Some(2)), "Passport".into()),
     ]);
+}
+
+#[test]
+fn xlsx_dates() {
+    let h = tmp("xlsxdates");
+    let book = |name: &str, pr: &str, cells: &str| {
+        let p = h.join(name);
+        zipped(&p, &[
+            ("xl/workbook.xml", &format!(r#"<workbook xmlns:r="r">{pr}<sheets><sheet name="S" r:id="rId1"/></sheets></workbook>"#)),
+            ("xl/_rels/workbook.xml.rels", r#"<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>"#),
+            ("xl/sharedStrings.xml", "<sst><si><t>Item</t></si></sst>"),
+            ("xl/styles.xml", r#"<styleSheet><numFmts><numFmt numFmtId="164" formatCode="yyyy\-mm\-dd"/><numFmt numFmtId="165" formatCode="0.0&quot; days&quot;"/>
+                <numFmt numFmtId="166" formatCode="[Red]0.00"/><numFmt numFmtId="167" formatCode="[$-409]mmmm d, yyyy;@"/></numFmts>
+                <cellStyleXfs><xf numFmtId="14"/></cellStyleXfs>
+                <cellXfs><xf numFmtId="0"/><xf numFmtId="14"/><xf numFmtId="164"/><xf numFmtId="165"/><xf numFmtId="166"/><xf numFmtId="20"/><xf numFmtId="22"/><xf numFmtId="167"/></cellXfs></styleSheet>"#),
+            ("xl/worksheets/sheet1.xml", &format!(r#"<worksheet><sheetData><row r="1">{cells}</row></sheetData></worksheet>"#)),
+        ]);
+        texts(&doc(&p, &h).unwrap())[0].1.clone()
+    };
+    // Built-in and custom date and time formats; quoted, escaped and [bracketed] letters are not; nor are unstyled numbers and strings.
+    let cells = r#"<c s="1"><v>46313</v></c><c s="2"><v>46313.75</v></c><c s="3"><v>2.5</v></c><c s="4"><v>46313</v></c><c s="5"><v>0.6041666666666666</v></c>
+        <c s="6"><v>46313.5</v></c><c s="7"><v>46313</v></c><c><v>46313</v></c><c s="1" t="s"><v>0</v></c><c s="1"><v>oops</v></c>"#;
+    assert_eq!(book("a.xlsx", "", cells), "2026-10-18 | 2026-10-18 | 2.5 | 46313 | 14:30 | 2026-10-18 12:00 | 2026-10-18 | 46313 | Item | oops");
+    assert_eq!(book("mac.xlsx", r#"<workbookPr date1904="1"/>"#, r#"<c s="1"><v>44851</v></c>"#), "2026-10-18");
 }
 
 #[test]

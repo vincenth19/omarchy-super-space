@@ -1,4 +1,5 @@
 //! Text out of documents as lines, each with where it is, and lines grouped into parts.
+use chrono::{NaiveDate, TimeDelta};
 use quick_xml::events::{BytesStart, Event};
 use ss_core::Locator;
 use std::collections::HashMap;
@@ -239,7 +240,8 @@ fn pptx(z: &mut Zip) -> Option<Lines> {
     Some(out)
 }
 
-/// One line per non-empty row, cells joined by " | ", for every sheet with its name.
+/// One line per non-empty row, cells joined by " | ", for every sheet with its name. Numbers
+/// in a date or time format read as 2026-10-18, 14:30 or 2026-10-18 14:30.
 fn xlsx(z: &mut Zip) -> Option<Lines> {
     let mut shared = Vec::new();
     if let Some(x) = read(z, "xl/sharedStrings.xml") {
@@ -252,28 +254,34 @@ fn xlsx(z: &mut Zip) -> Option<Lines> {
             _ => {}
         });
     }
+    let styles = read(z, "xl/styles.xml").map(|x| date_styles(&x)).unwrap_or_default();
     let targets = rels(z, "xl/workbook.xml");
-    let mut sheets = Vec::new();
-    xml(&read(z, "xl/workbook.xml")?, |e| {
-        if let X::Open(b"sheet", a) = e {
-            sheets.push((attr(a, b"name"), attr(a, b"r:id")));
-        }
+    let (mut sheets, mut date1904) = (Vec::new(), false);
+    xml(&read(z, "xl/workbook.xml")?, |e| match e {
+        X::Open(b"sheet", a) => sheets.push((attr(a, b"name"), attr(a, b"r:id"))),
+        X::Open(b"workbookPr", a) => date1904 = matches!(&*attr(a, b"date1904"), "1" | "true"),
+        _ => {}
     });
     let mut out = Vec::new();
     for (name, id) in sheets {
         let Some(x) = targets.get(&id).and_then(|p| read(z, p)) else { continue };
-        let (mut row, mut cells, mut val, mut kind, mut on) = (0u32, Vec::new(), String::new(), String::new(), false);
+        let (mut row, mut cells, mut val, mut kind, mut style, mut on) = (0u32, Vec::new(), String::new(), String::new(), 0, false);
         xml(&x, |e| match e {
             X::Open(b"row", a) => row = attr(a, b"r").parse().unwrap_or(row.saturating_add(1)),
             X::Open(b"c", a) => {
                 kind = attr(a, b"t");
+                style = attr(a, b"s").parse().unwrap_or(0);
                 val.clear();
             }
             X::Open(b"v" | b"t", _) => on = true,
             X::Close(b"v" | b"t") => on = false,
             X::Text(t) if on => val.push_str(t),
             X::Close(b"c") => {
-                let v = if kind == "s" { val.trim().parse().ok().and_then(|i: usize| shared.get(i)).map_or("", |s| s.as_str()) } else { &val };
+                let v = match &*kind {
+                    "s" => val.trim().parse().ok().and_then(|i: usize| shared.get(i)).cloned().unwrap_or_default(),
+                    "" | "n" => styles.get(style).copied().flatten().and_then(|f| serial_date(&val, date1904, f)).unwrap_or_else(|| val.clone()),
+                    _ => val.clone(),
+                };
                 let v = v.split_whitespace().collect::<Vec<_>>().join(" ");
                 if !v.is_empty() {
                     cells.push(v);
@@ -287,6 +295,61 @@ fn xlsx(z: &mut Zip) -> Option<Lines> {
         });
     }
     Some(out)
+}
+
+/// For each cell style (styles.xml cellXfs, by index), the chrono format to show its numbers
+/// with when its number format is a date or a time: built-in formats 14-22, or a custom code
+/// with d, m or y (date) or h or s (time) outside quotes, escapes and [colours or locales].
+fn date_styles(x: &[u8]) -> Vec<Option<&'static str>> {
+    let (mut custom, mut styles, mut in_cells) = (HashMap::new(), Vec::new(), false);
+    xml(x, |e| match e {
+        X::Open(b"numFmt", a) => {
+            custom.insert(attr(a, b"numFmtId"), attr(a, b"formatCode"));
+        }
+        X::Open(b"cellXfs", _) => in_cells = true,
+        X::Close(b"cellXfs") => in_cells = false,
+        X::Open(b"xf", a) if in_cells => {
+            let id = attr(a, b"numFmtId");
+            let (date, time) = match custom.get(&id) {
+                Some(code) => {
+                    let (mut plain, mut it) = (String::new(), code.chars());
+                    while let Some(c) = it.next() {
+                        match c {
+                            '"' => _ = it.find(|&c| c == '"'),
+                            '[' => _ = it.find(|&c| c == ']'),
+                            '\\' | '_' | '*' => _ = it.next(), // the next character is literal or padding
+                            c => plain.push(c.to_ascii_lowercase()),
+                        }
+                    }
+                    let time = plain.contains(['h', 's']);
+                    (plain.contains(['d', 'y']) || plain.contains('m') && !time, time) // with h or s, a lone m is minutes
+                }
+                None => match id.parse() {
+                    Ok(14..=17) => (true, false),
+                    Ok(18..=21) => (false, true),
+                    Ok(22) => (true, true),
+                    _ => (false, false),
+                },
+            };
+            styles.push(match (date, time) {
+                (true, false) => Some("%Y-%m-%d"),
+                (false, true) => Some("%H:%M"),
+                (true, true) => Some("%Y-%m-%d %H:%M"),
+                _ => None,
+            });
+        }
+        _ => {}
+    });
+    styles
+}
+
+/// A spreadsheet date serial (days since 1899-12-30, or 1904-01-01; the fraction is the time of
+/// day) in `fmt`.
+fn serial_date(v: &str, date1904: bool, fmt: &str) -> Option<String> {
+    let (y, m, d) = if date1904 { (1904, 1, 1) } else { (1899, 12, 30) };
+    let secs = TimeDelta::try_seconds((v.trim().parse::<f64>().ok()? * 86400.0).round() as i64)?;
+    let t = NaiveDate::from_ymd_opt(y, m, d)?.and_hms_opt(0, 0, 0)?.checked_add_signed(secs)?;
+    Some(t.format(fmt).to_string())
 }
 
 /// OpenDocument content.xml: ODT by paragraph, ODS by row with sheet names (one line per

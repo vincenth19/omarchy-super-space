@@ -16,13 +16,10 @@ use std::sync::{LazyLock, Mutex};
 const MAX_FILE: u64 = 50 << 20;
 /// At most this much text is read out of one file.
 const MAX_TEXT: usize = 1 << 20;
+/// Only a file's first this many bytes of text get meaning (embedded parts, about 40k tokens or
+/// 7 minutes of the Pi's index server); later parts are found by keyword only.
+const MAX_EMBED: usize = 160_000;
 
-/// Photos, video and audio: ss-media's job. Must match ss_media::is_media, or files fall between the crates.
-const MEDIA: &[&str] = &[
-    "jpg", "jpeg", "png", "webp", "gif", "bmp", "tif", "tiff", "heic", "heif", "avif", "jxl", "mp4", "m4v", "mkv",
-    "webm", "mov", "avi", "wmv", "flv", "mpg", "mpeg", "3gp", "ogv", "mp3", "flac", "ogg", "oga", "opus", "m4a",
-    "aac", "wav", "wma", "aif", "aiff", "ape", "wv", "mka",
-];
 /// Binary formats worth indexing (by content or by name), so the binary check skips them.
 const KNOWN_BINARY: &[&str] = &[
     "pdf", "docx", "xlsx", "pptx", "odt", "ods", "odp", "odg", "epub", "doc", "xls", "ppt", "zip", "tar", "gz",
@@ -63,26 +60,29 @@ pub fn roots(home: &Path) -> Vec<PathBuf> {
     roots
 }
 
-/// Whether a file or folder passes the exclusion rules (names, opt-out markers, .gitignore,
-/// file checks). It does not check that the path lies under a root.
+/// [`wanted_in`] for `$HOME`.
 pub fn wanted(path: &Path) -> bool {
+    wanted_in(path, &std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default())
+}
+
+/// Whether a file or folder passes the exclusion rules (names, opt-out markers, .gitignore,
+/// file checks) as crawl(home) applies them: only to folders from `path` up to its root, so a
+/// home or root inside a dot folder works. It does not check that the path lies under a root.
+pub fn wanted_in(path: &Path, home: &Path) -> bool {
     let Ok(meta) = fs::symlink_metadata(path) else { return false };
-    if meta.file_type().is_symlink() || path.components().any(|c| matches!(c, Component::Normal(n) if skip_name(n))) {
+    let root = root_of(path, home);
+    let below = path.strip_prefix(&root).unwrap_or(path);
+    if meta.file_type().is_symlink() || opted_out(home) || below.components().any(|c| matches!(c, Component::Normal(n) if skip_name(n))) {
         return false;
     }
-    // Opt-outs count up to and including home; .gitignore up to, not including, home (a
-    // dotfiles repo at ~ must not hide ~/Documents). Each enclosing repo is asked about the
-    // path, or about the repo nested inside it, as crawl sees them.
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    // Each enclosing repo is asked about the path, or about the repo nested inside it, as crawl
+    // sees them. Home's own repo never counts: a dotfiles repo at ~ must not hide ~/Documents.
     let mut asked = path;
-    for d in path.ancestors().skip(usize::from(!meta.is_dir())) {
+    for d in path.ancestors().skip(usize::from(!meta.is_dir())).take_while(|d| d.starts_with(&root)) {
         if opted_out(d) {
             return false;
         }
-        if Some(d) == home.as_deref() {
-            break;
-        }
-        if d != asked && d.join(".git").exists() {
+        if d != asked && d != home && d.join(".git").exists() {
             let ignored = Command::new("git").arg("-C").arg(d).args(["check-ignore", "-q", "--"]).arg(asked)
                 .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
             if ignored.is_ok_and(|s| s.code() == Some(0)) {
@@ -92,6 +92,12 @@ pub fn wanted(path: &Path) -> bool {
         }
     }
     meta.is_dir() || file_ok(path, &meta)
+}
+
+/// The root `path` lies under (roots are disjoint except home, which comes last), or "" when
+/// it lies under none.
+fn root_of(path: &Path, home: &Path) -> PathBuf {
+    roots(home).into_iter().find(|r| path.starts_with(r)).unwrap_or_default()
 }
 
 /// Every wanted file under the roots (home itself top level only).
@@ -115,12 +121,24 @@ pub fn crawl(home: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// Every wanted file below `dir`, a folder that was just created or moved in, as crawl(home)
+/// finds them: nothing unless `dir` is inside a recursive root (home is top level only). One
+/// `git ls-files` for the repo around `dir`, if any, decides what is kept inside it.
+pub fn crawl_dir(dir: &Path, home: &Path) -> Vec<PathBuf> {
+    let (root, mut out) = (root_of(dir, home), Vec::new());
+    if root != home && wanted_in(dir, home) {
+        let repo = dir.ancestors().skip(1).take_while(|d| d.starts_with(&root)).find(|d| d.join(".git").exists());
+        walk(dir, repo.and_then(|r| git_files(r, dir)).as_ref(), &mut out);
+    }
+    out
+}
+
 /// Inside a git repo `keep` holds every path git does not ignore (files and their folders).
 fn walk(dir: &Path, keep: Option<&HashSet<PathBuf>>, out: &mut Vec<PathBuf>) {
     if opted_out(dir) {
         return;
     }
-    let listed = if dir.join(".git").exists() { git_files(dir) } else { None };
+    let listed = if dir.join(".git").exists() { git_files(dir, dir) } else { None };
     let keep = listed.as_ref().or(keep);
     for e in fs::read_dir(dir).into_iter().flatten().flatten() {
         let p = e.path();
@@ -136,9 +154,10 @@ fn walk(dir: &Path, keep: Option<&HashSet<PathBuf>>, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Tracked and untracked-but-not-ignored files of a repo, with every folder leading to them.
-fn git_files(repo: &Path) -> Option<HashSet<PathBuf>> {
-    let out = Command::new("git").arg("-C").arg(repo).args(["ls-files", "-z", "-co", "--exclude-standard"])
+/// Tracked and untracked-but-not-ignored files of a repo below `under`, with every folder
+/// leading to them.
+fn git_files(repo: &Path, under: &Path) -> Option<HashSet<PathBuf>> {
+    let out = Command::new("git").arg("-C").arg(repo).args(["ls-files", "-z", "-co", "--exclude-standard", "--"]).arg(under)
         .stdin(Stdio::null()).stderr(Stdio::null()).output().ok().filter(|o| o.status.success())?;
     let mut keep = HashSet::new();
     for rel in out.stdout.split(|&b| b == 0).filter(|r| !r.is_empty()) {
@@ -176,7 +195,7 @@ fn file_ok(path: &Path, meta: &Metadata) -> bool {
     if junk || !meta.is_file() {
         return false;
     }
-    if MEDIA.contains(&&*ext) || KNOWN_BINARY.contains(&&*ext) {
+    if ss_media::is_media(path) || KNOWN_BINARY.contains(&&*ext) {
         return true;
     }
     let mut head = Vec::new();
@@ -190,10 +209,10 @@ fn file_ok(path: &Path, meta: &Metadata) -> bool {
 /// The Doc for a non-media file: title, icon, action and text parts with locators.
 /// Returns None for media files (ss-media handles those) and unreadable files.
 pub fn doc(path: &Path, home: &Path) -> Option<Doc> {
-    let ext = ext(path);
-    if MEDIA.contains(&&*ext) {
+    if ss_media::is_media(path) {
         return None;
     }
+    let ext = ext(path);
     let meta = fs::symlink_metadata(path).ok().filter(|m| m.is_file())?;
     let title = path.file_name()?.to_string_lossy().into_owned();
     let names = words(&path.file_stem()?.to_string_lossy());
@@ -205,9 +224,12 @@ pub fn doc(path: &Path, home: &Path) -> Option<Doc> {
         total <= MAX_TEXT
     });
     let max = if matches!(&*ext, "pdf" | "pptx" | "odp") { 3000 } else { 800 };
-    let parts = extract::chunk(lines, max).into_iter()
-        .map(|(locator, text)| Part { embed: Embed::Text(ss_core::doc_text(&heading, &text)), text, locator })
-        .collect();
+    let mut embedded = 0;
+    let parts = extract::chunk(lines, max).into_iter().map(|(locator, text)| {
+        let embed = if embedded < MAX_EMBED { Embed::Text(ss_core::doc_text(&heading, &text)) } else { Embed::None };
+        embedded += text.len();
+        Part { embed, text, locator }
+    }).collect();
     let subtitle = match path.parent().map(|p| (p, p.strip_prefix(home))) {
         Some((_, Ok(d))) if d.as_os_str().is_empty() => "~".to_owned(),
         Some((_, Ok(d))) => format!("~/{}", d.display()),
@@ -222,8 +244,8 @@ pub fn doc(path: &Path, home: &Path) -> Option<Doc> {
         subtitle,
         icon: icon(&ext),
         action: Action::Open { path: path.display().to_string(), locator: Locator::default() },
-        // "x1": bump when extraction changes, so every file is read again.
-        stamp: format!("x1-{mtime}-{}", meta.len()),
+        // "x2": bump when extraction changes, so every file is read again.
+        stamp: format!("x2-{mtime}-{}", meta.len()),
         names,
         parts,
     })
