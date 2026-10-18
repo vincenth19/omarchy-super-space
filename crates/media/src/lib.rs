@@ -1,6 +1,6 @@
 //! Photos, videos and audio: frames, transcripts, lyrics. Owner: media agent.
 //!
-//! The slow work runs in child processes at the lowest CPU priority: ffmpeg and
+//! The slow work runs in child processes at idle CPU priority: ffmpeg and
 //! ffprobe (frames, thumbnails, audio), tesseract (text in screenshots) and
 //! whisper.cpp's `whisper-cli` (speech to text). Results are kept under
 //! `<cache>/media/<hash of path>/<hash of stamp>/`, so indexing an unchanged
@@ -47,9 +47,9 @@ pub fn is_media(path: &Path) -> bool {
 }
 
 /// What `doc` puts in `Doc::stamp`, without the slow work: it changes when the
-/// file changes, when a song's sibling `.lrc` changes, when a video's frame gap
-/// changes, and when speech to text gets installed (so media indexed before that
-/// gets its transcripts).
+/// file changes, when a song's sibling `.lrc` changes, when a video's frame gap or
+/// the way frames are picked changes, and when speech to text gets installed (so media
+/// indexed before that gets its transcripts).
 pub fn stamp(path: &Path, home: &Path) -> Option<String> {
     let kind = kind(path)?;
     let mtime = |p: &Path| {
@@ -63,7 +63,7 @@ pub fn stamp(path: &Path, home: &Path) -> Option<String> {
         s += &format!("-lrc{l}");
     }
     if kind == Kind::Video {
-        s += &format!("-g{}", frame_gap());
+        s += &format!("-v3-g{}-{}", frame_gap(0.0), frame_gap(f32::INFINITY)); // v2: near-black frames skipped; v3: gap by length
     }
     if kind != Kind::Image && whisper(home).is_some() {
         s += "-stt";
@@ -239,7 +239,8 @@ fn build(kind: Kind, path: &Path, home: &Path, dir: &Path) -> (Saved, bool) {
             }
         }
         Kind::Video => {
-            let frames = if has("video") { frames(path, dir, duration.unwrap_or(0.0), frame_gap(), limit) } else { Some(Vec::new()) };
+            let d = duration.unwrap_or(0.0);
+            let frames = if has("video") { frames(path, dir, d, frame_gap(d), limit) } else { Some(Vec::new()) };
             complete = frames.is_some();
             let frames = frames.unwrap_or_default();
             if let Some((first, _)) = frames.first() {
@@ -269,22 +270,42 @@ fn build(kind: Kind, path: &Path, home: &Path, dir: &Path) -> (Saved, bool) {
     (s, complete)
 }
 
-/// Run a tool at the lowest CPU priority, so indexing never slows down the desktop or a
-/// search. Past `limit` it counts as hung: its process group (it and its children) is killed.
+/// `systemd-run` arguments that start a tool in an idle-weight cgroup of its own, with the same
+/// PID. Nice values do not cross cgroups, so a niced tool in the daemon's cgroup still starves
+/// the model servers. Not expanding `$` keeps file names as they are.
+const SCOPE: &[&str] = &["--user", "--scope", "-q", "--collect", "--expand-environment=no", "-p", "CPUWeight=idle", "--"];
+
+/// Whether systemd-run and a user manager can start tools in an idle scope (checked once).
+fn scoped() -> bool {
+    static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OK.get_or_init(|| Command::new("systemd-run").args(SCOPE).arg("true").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success()))
+}
+
+/// Run a tool at idle priority, so indexing never slows down the desktop, a search or the
+/// index server: in an idle scope when it can, and at nice 19 always. It dies with the
+/// daemon even outside the daemon's cgroup. Past `limit` it counts as hung: its process
+/// group (it and its children) is killed.
 fn run(cmd: &mut Command, limit: Duration) -> Option<Output> {
     unsafe extern "C" {
         fn nice(inc: i32) -> i32;
         fn kill(pid: i32, sig: i32) -> i32;
+        #[cfg(target_os = "linux")]
+        fn prctl(option: i32, ...) -> i32;
     }
-    // SAFETY: nice(2) is async-signal-safe, so it may run between fork and exec.
+    let tool = cmd.get_program().to_owned();
+    let mut scope = Command::new("systemd-run");
+    let cmd = if scoped() { scope.args(SCOPE).arg(&tool).args(cmd.get_args()) } else { cmd };
+    // SAFETY: nice(2) and prctl(2) are async-signal-safe, so they may run between fork and exec.
     unsafe {
         cmd.pre_exec(|| {
             nice(19);
+            #[cfg(target_os = "linux")]
+            prctl(1, 9); // PR_SET_PDEATHSIG, SIGKILL; kept across systemd-run's exec
             Ok(())
         });
     }
     let child = cmd.process_group(0).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().ok()?;
-    let (group, tool) = (child.id() as i32, cmd.get_program().to_owned());
+    let group = child.id() as i32; // systemd-run execs the tool, so this is the tool's group
     let (done, wait) = mpsc::channel::<()>();
     let watchdog = std::thread::spawn(move || {
         if wait.recv_timeout(limit) == Err(mpsc::RecvTimeoutError::Timeout) {
@@ -354,12 +375,13 @@ fn ocr(path: &Path, limit: Duration) -> Option<String> {
     (words >= 3).then_some(text)
 }
 
-/// Seconds between video frames: `SUPERSPACE_FRAME_GAP` when set (8 if it is not a number),
-/// else 8 on machines with 4 or fewer cores (the Pi 5 takes ~3.9 s to embed a frame), else 4.
-fn frame_gap() -> f32 {
+/// Seconds between frames of a video `duration` s long: `SUPERSPACE_FRAME_GAP` when set (8 if
+/// it is not a number), else 8 for videos over 2 minutes on machines with 4 or fewer cores
+/// (the Pi 5 takes ~3.9 s to embed a frame), else 4: 8 s can miss a short clip's best moment.
+fn frame_gap(duration: f32) -> f32 {
     match std::env::var("SUPERSPACE_FRAME_GAP") {
         Ok(g) => g.parse().unwrap_or(8.0),
-        Err(_) if !std::thread::available_parallelism().is_ok_and(|n| n.get() > 4) => 8.0,
+        Err(_) if duration > 120.0 && !std::thread::available_parallelism().is_ok_and(|n| n.get() > 4) => 8.0,
         Err(_) => 4.0,
     }
 }
@@ -367,14 +389,21 @@ fn frame_gap() -> f32 {
 /// Video frames, 448 px, each with its 160 px thumbnail, and their times: the first, one
 /// `gap` s after the last and one at each scene change, but at most two per `gap` s on
 /// average, so a film full of cuts stays cheap. Past 8 minutes the gap widens: a video
-/// gets at most 960 / `gap` frames (120 at 8 s).
+/// gets at most 960 / `gap` frames (120 at 8 s). Near-black frames (mean luma 16 of 255 or
+/// less) are never picked, so a cut to a fade from black gets the first frame that shows something.
 fn frames(path: &Path, dir: &Path, duration: f32, gap: f32, limit: Duration) -> Option<Vec<(PathBuf, f32)>> {
     let gap = gap * (duration / 480.0).max(1.0);
-    let select = format!("select='isnan(prev_selected_t)+lt(selected_n*{gap},2*t)*(gte(t-prev_selected_t,{gap})+gt(scene,0.3)*gte(t-prev_selected_t,1))'");
+    // Scaled (to 8-bit full range, where black is 0) before measuring every frame's brightness:
+    // on the Pi, 1.4x the old work instead of 2.5x. A fixed format also lets ffmpeg end cleanly with no frames.
+    let select = format!(
+        "{},format=yuvj420p,signalstats,metadata=select:key=lavfi.signalstats.YAVG:value=16:function=greater,\
+         select='isnan(prev_selected_t)+lt(selected_n*{gap},2*t)*(gte(t-prev_selected_t,{gap})+gt(scene,0.3)*gte(t-prev_selected_t,1))'",
+        fit(448)
+    );
     let out = run(Command::new("ffmpeg")
         .args(["-hide_banner", "-nostats", "-y", "-skip_frame", "noref", "-i"])
         .arg(path)
-        .args(["-an", "-sn", "-dn", "-filter_complex", &format!("[0:v]{select},{},showinfo,split[a][b];[b]{}[c]", fit(448), fit(160))])
+        .args(["-an", "-sn", "-dn", "-filter_complex", &format!("[0:v]{select},showinfo,split[a][b];[b]{}[c]", fit(160))])
         .args(["-map", "[a]", "-fps_mode", "vfr", "-q:v", "3"])
         .arg(dir.join("f%04d.jpg"))
         .args(["-map", "[c]", "-fps_mode", "vfr", "-q:v", "5"])

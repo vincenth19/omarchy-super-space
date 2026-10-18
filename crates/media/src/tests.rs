@@ -154,9 +154,9 @@ fn video_frames_thumbs_cache_and_cleanup() {
         &path,
     );
     let d = doc(&path, &s.home(), &s.cache()).unwrap();
-    let gap = frame_gap();
+    let gap = frame_gap(13.0);
     assert_eq!((d.key.as_str(), d.kind, d.title.as_str(), d.subtitle.as_str()), ("file:Videos/clip.mp4", Kind::Video, "clip.mp4", "~/Videos"));
-    assert!(d.stamp.ends_with(&format!("-g{gap}")), "{}", d.stamp);
+    assert!(d.stamp.ends_with(&format!("-v3-g{gap}-{}", frame_gap(f32::INFINITY))), "{}", d.stamp);
     let times: Vec<(f32, f32)> = d.parts.iter().map(|p| (p.locator.t.unwrap(), p.locator.t_end.unwrap())).collect();
     println!("frames {times:?}");
     assert_eq!(times[0].0, 0.0);
@@ -212,6 +212,59 @@ fn frames_at_every_cut_but_few() {
         let n = times(&cuts, 600.0, gap).len() as f32;
         assert!((480.0 / gap..=960.0 / gap).contains(&n), "{n} frames at gap {gap}");
     }
+}
+
+#[test]
+fn short_videos_keep_4_s_frames() {
+    // At 8 s the demo's 59 s weekend clip lost its best golden retriever frame (0:49).
+    let few_cores = std::thread::available_parallelism().unwrap().get() <= 4;
+    assert_eq!([frame_gap(59.0), frame_gap(120.0), frame_gap(121.0)], [4.0, 4.0, if few_cores { 8.0 } else { 4.0 }]);
+}
+
+#[test]
+fn tools_run_idle_with_names_as_they_are() {
+    let out = run(Command::new("sh").args(["-c", "echo \"$0\"; ps -o ni= -p $$; cat /proc/self/cgroup 2>/dev/null; true", "${HOME}$$"]), Duration::from_secs(10)).unwrap();
+    let out = String::from_utf8(out.stdout).unwrap();
+    let lines: Vec<&str> = out.lines().map(str::trim).collect();
+    assert_eq!(lines[..2], ["${HOME}$$", "19"], "{out}");
+    if scoped() {
+        let cg = lines.iter().find_map(|l| l.strip_prefix("0::")).unwrap();
+        assert!(cg.ends_with(".scope"), "{cg}");
+        assert_eq!(fs::read_to_string(format!("/sys/fs/cgroup{cg}/cpu.idle")).unwrap().trim(), "1", "idle scope {cg}");
+    }
+    println!("scoped {} {out}", scoped());
+}
+
+/// Mean luma of a picture, 0-255.
+fn luma(image: &Path) -> f32 {
+    let out = Command::new("ffmpeg").arg("-i").arg(image).args(["-vf", "signalstats,metadata=print:key=lavfi.signalstats.YAVG", "-f", "null", "-"]).output().unwrap();
+    String::from_utf8_lossy(&out.stderr).split_once("YAVG=").unwrap().1.split_whitespace().next().unwrap().parse().unwrap()
+}
+
+#[test]
+fn black_frames_are_skipped() {
+    let s = Scratch::new("black");
+    // Like the demo's weekend clip at 30 s: a cut to black that fades in, here at 0 and 6 s.
+    let path = s.home().join("Videos/fades.mp4");
+    ffmpeg(
+        &[
+            "-f", "lavfi", "-i", "testsrc2=s=640x360:r=30:d=6,fade=in:d=1.5",
+            "-f", "lavfi", "-i", "smptebars=s=640x360:r=30:d=6,fade=in:d=1.5",
+            "-filter_complex", "[0:v][1:v]concat=n=2:v=1[v]", "-map", "[v]", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        ],
+        &path,
+    );
+    let d = doc(&path, &s.home(), &s.cache()).unwrap();
+    let frames: Vec<(f32, f32)> = d.parts.iter().map(|p| (p.locator.t.unwrap(), match &p.embed { Embed::Image(f) => luma(f), _ => panic!("frame part") })).collect();
+    println!("(time, luma) {frames:?}");
+    assert!(frames.iter().all(|f| f.1 > 15.0), "no near-black frame: {frames:?}");
+    assert!((0.1..1.5).contains(&frames[0].0), "the first frame that shows something: {frames:?}");
+    assert!(frames.iter().any(|f| (6.1..7.5).contains(&f.0)), "the cut at 6 s, once it shows something: {frames:?}");
+    // Black throughout: no frames, and that result is kept.
+    let black = s.home().join("Videos/black.mp4");
+    ffmpeg(&["-f", "lavfi", "-i", "color=c=black:s=320x240:r=30:d=3", "-c:v", "libx264", "-pix_fmt", "yuv420p"], &black);
+    let d = doc(&black, &s.home(), &s.cache()).unwrap();
+    assert!(d.parts.is_empty() && d.icon == "video-x-generic" && load(&results(&black, &s.cache(), &d.stamp)).is_some());
 }
 
 #[test]
