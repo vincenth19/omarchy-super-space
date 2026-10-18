@@ -1,0 +1,3 @@
+emoji.tsv is derived from Unicode emoji-test.txt 17.0 and CLDR 48 annotations
+(English and Indonesian), Copyright © 1991-2025 Unicode, Inc., used under the
+Unicode License v3 (LICENSE-UNICODE in this folder). make-emoji.py rebuilds it.
