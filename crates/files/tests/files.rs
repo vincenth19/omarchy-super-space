@@ -1,7 +1,7 @@
 //! Fixtures are built here: zips for the office formats, a tiny PDF, git repos.
 //! PDF and git checks run only where pdftotext / git exist (the Arch image has both).
 use ss_core::{Action, Embed, Kind, Locator};
-use ss_files::{crawl, crawl_dir, doc, roots, wanted_in};
+use ss_files::{crawl, crawl_dir, doc, icon, roots, wanted_in};
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::Write;
@@ -34,8 +34,16 @@ fn has(cmd: &str) -> bool {
     Command::new(cmd).arg("-v").output().is_ok() // it runs at all
 }
 
+/// The text parts, without the overview.
 fn texts(d: &ss_core::Doc) -> Vec<(Locator, String)> {
-    d.parts.iter().map(|p| (p.locator.clone(), p.text.clone())).collect()
+    d.parts.iter().filter(|p| !p.text.is_empty()).map(|p| (p.locator.clone(), p.text.clone())).collect()
+}
+
+/// The model input of the overview part: first, with no text or locator.
+fn overview(d: &ss_core::Doc) -> Option<String> {
+    let p = d.parts.first().filter(|p| p.text.is_empty() && p.locator == Locator::default())?;
+    let Embed::Text(t) = &p.embed else { return None };
+    Some(t.clone())
 }
 
 fn loc(page: Option<u32>, slide: Option<u32>, sheet: Option<&str>, row: Option<u32>) -> Locator {
@@ -67,6 +75,8 @@ fn exclusion_rules_and_crawl_agree() {
         ("Documents/tool.py", b"print('hi')\n"),
         ("Documents/README", b"plain words\n"),
         ("Documents/sub/deeper/data.csv", b"a,b\n1,2\n"),
+        ("Documents/song.mp3", b"ID3"),
+        ("Documents/poem.lrc", b"[00:01.00]lyrics with no song\n"),
         ("top.txt", b"top level file\n"),
     ];
     let minified = "var a=1;".repeat(700);
@@ -88,6 +98,7 @@ fn exclusion_rules_and_crawl_agree() {
         ("Documents/bundle.js", minified.as_bytes()),
         ("Documents/blob.bin", b"ab\0cd"),
         ("Documents/a.sqlite", b"x"),
+        ("Documents/song.lrc", b"[00:01.00]the song's own lyrics, read by ss-media\n"),
         ("Documents/a.sqlite-wal", b"x"),
         ("Documents/disk.iso", b"x"),
         ("Documents/cache/CACHEDIR.TAG", b"Signature: 8a477f597d28d172789f06886806bc55"),
@@ -221,7 +232,12 @@ fn text_file_doc() {
     assert!(d.stamp.ends_with(&format!("-{}", md.len())) && !d.icon.is_empty());
 
     let src: Vec<&str> = md.lines().collect();
-    assert!(d.parts.len() >= 5, "{} parts", d.parts.len());
+    assert!(d.parts.len() >= 6, "{} parts", d.parts.len());
+    // The overview: headings, then the opening lines, cut at a space near 800 bytes.
+    let gist = overview(&d).unwrap();
+    let gist = gist.strip_prefix("title: Meetup Notes 2026 draft | text: Meetup plan\nFood\nLine 0 talks").unwrap();
+    assert!((700..800).contains(&gist.len()) && gist.ends_with(|c: char| c.is_alphanumeric() || c == '.'), "{gist:?}");
+    let d = ss_core::Doc { parts: d.parts[1..].to_vec(), ..d };
     for (i, p) in d.parts.iter().enumerate() {
         assert!(p.text.len() <= 900, "part {i} has {} bytes", p.text.len());
         let Embed::Text(e) = &p.embed else { panic!("part {i} not embedded") };
@@ -248,6 +264,19 @@ fn text_file_doc() {
 }
 
 #[test]
+fn icons() {
+    let h = tmp("icons");
+    put(&h.join("a.pdf"), "%PDF");
+    // The lookup doc() uses, also for media rows: the default app for the type, else the type's icon.
+    assert_eq!(icon(&h.join("a.pdf")), doc(&h.join("a.pdf"), &h).unwrap().icon);
+    if Path::new("/usr/share/mime/globs2").exists() {
+        for f in ["song.mp3", "clip.MP4", "cat.jpg"] {
+            assert_ne!(icon(Path::new(f)), "text-x-generic", "{f}");
+        }
+    }
+}
+
+#[test]
 fn size_caps() {
     let h = tmp("caps");
     let big = h.join("big.txt");
@@ -262,11 +291,13 @@ fn size_caps() {
     let embedded = |p: &&ss_core::Part| matches!(p.embed, Embed::Text(_));
     let meaning: usize = d.parts.iter().take_while(embedded).map(|p| p.text.len()).sum();
     assert!((160_000..161_000).contains(&meaning), "{meaning}");
-    assert!(d.parts.iter().skip_while(embedded).all(|p| matches!(p.embed, Embed::None)));
+    let (gist, rest) = d.parts.split_first().unwrap();
+    assert!(rest.iter().skip_while(embedded).all(|p| matches!(p.embed, Embed::None)) && embedded(&gist));
     // One huge line (a paragraph with no breaks) is cut at spaces.
     put(&long, "word ".repeat(2000));
     let d = doc(&long, &h).unwrap();
-    assert!(d.parts.len() >= 12 && d.parts.iter().all(|p| p.text.len() <= 900 && p.locator.line == Some(1)));
+    assert!(d.parts.len() >= 12 && texts(&d).iter().all(|(l, t)| t.len() <= 900 && l.line == Some(1)));
+    assert!(overview(&d).unwrap().len() <= 800 + "title: long | text: ".len());
     // Non-ASCII text never splits a character.
     put(&long, "日本語のテキスト。".repeat(400));
     assert!(doc(&long, &h).unwrap().parts.len() > 3);
@@ -341,10 +372,13 @@ fn pptx() {
         ("ppt/slides/_rels/slide1.xml.rels", r#"<Relationships><Relationship Id="rId1" Target="../notesSlides/notesSlide1.xml"/></Relationships>"#),
         ("ppt/notesSlides/notesSlide1.xml", r#"<p:notes xmlns:a="a" xmlns:p="p"><a:p><a:r><a:t>Say hello to the room</a:t></a:r></a:p></p:notes>"#),
     ]);
-    assert_eq!(texts(&doc(&p, &h).unwrap()), [
+    let d = doc(&p, &h).unwrap();
+    assert_eq!(texts(&d), [
         (loc(None, Some(1), None, None), "Agenda\nsecond line".into()),
         (loc(None, Some(2), None, None), "Intro\nsecond line\nSay hello to the room".into()),
     ]);
+    // Slide titles first, then the rest, each line once; the type in the title.
+    assert_eq!(overview(&d).unwrap(), ss_core::doc_text("deck slides", "Agenda\nIntro\nsecond line\nSay hello to the room"));
 }
 
 #[test]
@@ -361,8 +395,12 @@ fn opendocument() {
     for (name, body) in [("a.odt", &odt), ("a.ods", &ods), ("a.odp", &odp)] {
         zipped(&h.join(name), &[("mimetype", "x"), ("content.xml", body)]);
     }
-    assert_eq!(texts(&doc(&h.join("a.odt"), &h).unwrap()), [(Locator::default(), "Title\nOne two\tthree span".into())]);
-    assert_eq!(texts(&doc(&h.join("a.ods"), &h).unwrap()), [
+    let odt = doc(&h.join("a.odt"), &h).unwrap();
+    assert_eq!(texts(&odt), [(Locator::default(), "Title\nOne two\tthree span".into())]);
+    assert!(odt.parts.len() == 1 && overview(&odt).is_none()); // one part is its own overview
+    let ods = doc(&h.join("a.ods"), &h).unwrap();
+    assert_eq!(overview(&ods).unwrap(), ss_core::doc_text("a spreadsheet", "Q1\nRent | 1200\nQ2\nFood"));
+    assert_eq!(texts(&ods), [
         (loc(None, None, Some("Q1"), Some(3)), "Rent | 1200".into()),
         (loc(None, None, Some("Q2"), Some(1)), "Food".into()),
     ]);

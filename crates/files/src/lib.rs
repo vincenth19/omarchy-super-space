@@ -184,14 +184,16 @@ fn ext(path: &Path) -> String {
     path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default()
 }
 
-/// The checks on a file itself: junk names, then binary (NUL in the first 8000 bytes) and
-/// minified (average line over 110 bytes; not applied to prose, whose paragraphs are long lines).
+/// The checks on a file itself: junk names and lyrics beside their song (ss-media reads those),
+/// then binary (NUL in the first 8000 bytes) and minified (average line over 110 bytes; not
+/// applied to prose, whose paragraphs are long lines).
 fn file_ok(path: &Path, meta: &Metadata) -> bool {
     let name = path.file_name().unwrap_or_default().to_string_lossy();
     let ext = ext(path);
     let junk = name.ends_with('~') || name.starts_with("~$") || name.ends_with(".min.js") || name.ends_with(".min.css")
         || JUNK_NAMES.contains(&&*name) || JUNK_EXT.contains(&&*ext)
-        || ["-journal", "-wal", "-shm"].iter().any(|s| ext.ends_with(s));
+        || ["-journal", "-wal", "-shm"].iter().any(|s| ext.ends_with(s))
+        || ss_media::lrc_owner(path).is_some();
     if junk || !meta.is_file() {
         return false;
     }
@@ -224,12 +226,20 @@ pub fn doc(path: &Path, home: &Path) -> Option<Doc> {
         total <= MAX_TEXT
     });
     let max = if matches!(&*ext, "pdf" | "pptx" | "odp") { 3000 } else { 800 };
+    let gist = overview(&lines);
     let mut embedded = 0;
-    let parts = extract::chunk(lines, max).into_iter().map(|(locator, text)| {
+    let mut parts: Vec<Part> = extract::chunk(lines, max).into_iter().map(|(locator, text)| {
         let embed = if embedded < MAX_EMBED { Embed::Text(ss_core::doc_text(&heading, &text)) } else { Embed::None };
         embedded += text.len();
         Part { embed, text, locator }
     }).collect();
+    // First, one part for queries about the whole document ("my CV", "quarterly sales spreadsheet").
+    // No text or locator, so it is never a keyword match or a jump point.
+    if parts.len() > 1 {
+        let kind = match &*ext { "xlsx" | "ods" | "csv" => "spreadsheet", "pptx" | "odp" => "slides", _ => "" };
+        let embed = Embed::Text(ss_core::doc_text(format!("{heading} {kind}").trim(), &gist));
+        parts.insert(0, Part { embed, text: String::new(), locator: Locator::default() });
+    }
     let subtitle = match path.parent().map(|p| (p, p.strip_prefix(home))) {
         Some((_, Ok(d))) if d.as_os_str().is_empty() => "~".to_owned(),
         Some((_, Ok(d))) => format!("~/{}", d.display()),
@@ -242,13 +252,38 @@ pub fn doc(path: &Path, home: &Path) -> Option<Doc> {
         kind: Kind::File,
         title,
         subtitle,
-        icon: icon(&ext),
+        icon: icon(path),
         action: Action::Open { path: path.display().to_string(), locator: Locator::default() },
-        // "x2": bump when extraction changes, so every file is read again.
-        stamp: format!("x2-{mtime}-{}", meta.len()),
+        // "x3": bump when extraction changes, so every file is read again.
+        stamp: format!("x3-{mtime}-{}", meta.len()),
         names,
         parts,
     })
+}
+
+/// A document's gist, about 800 bytes: sheet names, the first line of each page, slide, sheet
+/// or chapter and every Markdown heading, then its opening lines.
+fn overview(lines: &extract::Lines) -> String {
+    // (locator, text without heading marks, whether it is a heading)
+    let lines = lines.iter().map(|(l, t)| (l, t.trim())).filter_map(|(l, t)| {
+        let h = t.trim_start_matches('#');
+        (!h.trim().is_empty()).then(|| (l, h.trim_start(), h.len() < t.len()))
+    });
+    let mut prev = None;
+    let heads = lines.clone().flat_map(|(l, t, heading)| {
+        let new = prev.replace((&l.page, &l.slide, &l.sheet)) != Some((&l.page, &l.slide, &l.sheet));
+        l.sheet.as_deref().filter(|_| new).into_iter().chain((new || heading).then_some(t))
+    });
+    let (mut out, mut seen) = (String::new(), HashSet::new());
+    for l in heads.chain(lines.map(|x| x.1)) {
+        if out.len() >= 800 {
+            break;
+        }
+        if seen.insert(l) {
+            out = out + l + "\n";
+        }
+    }
+    extract::pieces(out.trim_end(), 800)[0].to_owned()
 }
 
 /// Words of a file name: split on anything not a letter or digit, and at camelCase humps.
@@ -267,10 +302,10 @@ fn words(stem: &str) -> Vec<String> {
     out
 }
 
-/// The default app's desktop id (without ".desktop") for the file's MIME type, else the
-/// type's generic icon from shared-mime-info (x-office-document, …), else text-x-generic.
-/// Only names: the user's icon theme draws them.
-fn icon(ext: &str) -> String {
+/// The default app's desktop id (without ".desktop") for the file's MIME type (by extension),
+/// else the type's generic icon from shared-mime-info (x-office-document, audio-x-generic, …),
+/// else text-x-generic. Only names: the user's icon theme draws them. Also for media rows.
+pub fn icon(path: &Path) -> String {
     static MIME: LazyLock<(HashMap<String, String>, HashMap<String, String>)> = LazyLock::new(|| {
         let read = |f: &str| fs::read_to_string(Path::new("/usr/share/mime").join(f)).unwrap_or_default();
         let mut globs = HashMap::new();
@@ -287,14 +322,18 @@ fn icon(ext: &str) -> String {
         (globs, generic)
     });
     static ICONS: LazyLock<Mutex<HashMap<String, String>>> = LazyLock::new(Default::default);
-    let mime = MIME.0.get(ext).map_or(if ext.is_empty() { "text/plain" } else { "application/octet-stream" }, |m| m);
+    let ext = ext(path);
+    let mime = MIME.0.get(&ext).map_or(if ext.is_empty() { "text/plain" } else { "application/octet-stream" }, |m| m);
     if let Some(i) = ICONS.lock().ok().and_then(|c| c.get(mime).cloned()) {
         return i;
     }
     let app = Command::new("xdg-mime").args(["query", "default", mime]).stdin(Stdio::null()).stderr(Stdio::null()).output().ok()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().trim_end_matches(".desktop").to_owned())
         .filter(|a| !a.is_empty());
-    let i = app.or_else(|| MIME.1.get(mime).cloned()).unwrap_or_else(|| "text-x-generic".into());
+    let i = app.or_else(|| MIME.1.get(mime).cloned()).unwrap_or_else(|| match mime.split('/').next() {
+        Some(m @ ("audio" | "video" | "image")) => format!("{m}-x-generic"), // shared-mime-info's default
+        _ => "text-x-generic".into(),
+    });
     if let Ok(mut c) = ICONS.lock() {
         c.insert(mime.to_owned(), i.clone());
     }

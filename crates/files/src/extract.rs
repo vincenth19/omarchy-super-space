@@ -89,7 +89,7 @@ pub(crate) fn chunk(lines: Lines, max: usize) -> Lines {
 }
 
 /// A line cut into pieces of at most `max` bytes, at spaces where possible.
-fn pieces(mut s: &str, max: usize) -> Vec<&str> {
+pub(crate) fn pieces(mut s: &str, max: usize) -> Vec<&str> {
     let mut out = Vec::new();
     while s.len() > max {
         let mut cut = max;
