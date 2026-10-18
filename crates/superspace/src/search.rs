@@ -35,7 +35,7 @@ pub struct QVecs {
 /// 18-19 Oct); history sits well above the rest: real browsing (tweets, search pages) matches
 /// anything at 0.68-0.70. `[cutoffs]` in preferences.toml overrides any of them.
 pub const CUTOFFS: &[(&str, f32)] = &[
-    ("app", 0.70), ("setting", 0.70), ("file", 0.68), ("image", 0.67), ("video", 0.705), ("audio", 0.645),
+    ("app", 0.70), ("setting", 0.70), ("file", 0.68), ("image", 0.67), ("video", 0.705), ("audio", 0.655),
     ("clip", 0.715), ("emoji", 0.705), ("history", 0.75), ("frame", 0.655), ("name", 0.80),
 ];
 /// The name score of a title with a typo of a query word ("chromum" for Chromium): just under a word-start match.
