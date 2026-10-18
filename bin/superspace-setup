@@ -1,16 +1,18 @@
 #!/bin/bash
-# Super Space setup: fetches the daemon, llama.cpp and EmbeddingGemma 2 (about
-# 900 MB, once), starts the services, gives your coding agents the skill and
-# MCP server, and offers to bind Super+Space. Run it again any time: finished
-# steps are skipped, and an updated plugin gets its new daemon.
+# Super Space setup: fetches the daemon, llama.cpp, EmbeddingGemma 2 and
+# whisper.cpp for speech (about 1 GB, once), starts the services, gives your
+# coding agents the skill and MCP server, and offers to bind Super+Space. Run
+# it again any time: finished steps are skipped, and an updated plugin gets its
+# new daemon.
 #
 #   superspace-setup [--yes] [--progress] [--binary PATH]   install or update
 #   superspace-setup bind | unbind     Super+Space opens Super Space, or not
-#   superspace-setup status            what is installed and running
+#   superspace-setup doctor            check that each installed piece works
 #   superspace-setup uninstall         undo everything (keeps preferences)
 #
 #   --yes          bind Super+Space without asking
-#   --progress     JSON lines on stdout instead of text, for the search box
+#   --progress     JSON lines on stdout instead of text, for the search box;
+#                  a daemon that already answers is left running
 #   --binary PATH  use a local build of superspace instead of the release
 
 set -euo pipefail
@@ -27,10 +29,14 @@ BINDINGS=$HOME/.config/hypr/bindings.lua
 MARK_BEGIN='-- >>> superspace-setup: Super+Space opens Super Space (undo: superspace-setup unbind)'
 MARK_END='-- <<< superspace-setup'
 LLAMA_BUILD=b11718
-# Pinned to a revision so the checksums below always match.
+WHISPER_BUILD=b5454
+# Pinned to revisions so the checksums below always match.
 HF=https://huggingface.co/ggml-org/embeddinggemma-2-GGUF/resolve/bfcd298762cc34d0357ece5ebdd31791a3a374d8
+HF_WHISPER=https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1
+HF_VAD=https://huggingface.co/ggml-org/whisper-vad/resolve/9ffd54a1e1ee413ddf265af9913beaf518d1639b
 MODEL=embeddinggemma-2-Q8_0.gguf
 MMPROJ=mmproj-embeddinggemma-2-Q8_0.gguf
+AGENTS=(claude codex gemini copilot opencode)
 
 # say STEP MESSAGE: {"step": …, "message": …} with --progress, else the message.
 say() {
@@ -102,20 +108,29 @@ install_binary() {
   chmod 755 "$BIN"
 }
 
-install_llama() {
-  [[ $(cat "$SHARE/llama/.build" 2>/dev/null) == "$LLAMA_BUILD" ]] && return
-  local tgz=llama-$LLAMA_BUILD-bin-ubuntu-$ARCH.tar.gz
-  fetch "https://github.com/ggml-org/llama.cpp/releases/download/$LLAMA_BUILD/$tgz" "$LLAMA_SUM" "$LLAMA_SIZE" "$SHARE/$tgz"
-  rm -rf "$SHARE/llama"
-  mkdir -p "$SHARE/llama"
-  tar -xzf "$SHARE/$tgz" -C "$SHARE/llama" --strip-components=1
-  echo "$LLAMA_BUILD" >"$SHARE/llama/.build"
-  rm "$SHARE/$tgz"
+# unpack DIR BUILD URL SHA256 SIZE: a release tarball into $SHARE/DIR, once per build.
+unpack() {
+  [[ $(cat "$SHARE/$1/.build" 2>/dev/null) == "$2" ]] && return
+  local tgz=$SHARE/${3##*/}
+  fetch "$3" "$4" "$5" "$tgz"
+  rm -rf "${SHARE:?}/$1"
+  mkdir -p "$SHARE/$1"
+  tar -xzf "$tgz" -C "$SHARE/$1" --strip-components=1
+  echo "$2" >"$SHARE/$1/.build"
+  rm "$tgz"
 }
 
-# Speech-to-text engine for spoken words and lyrics. The media owner supplies
-# the pinned URLs and checksums; until then nothing is downloaded.
-install_stt() { :; }
+# Speech to text for spoken words and lyrics: whisper.cpp's own build (its
+# libraries stay beside whisper-cli), a small multilingual model and a voice
+# detector. The media crate looks for exactly these paths.
+install_stt() {
+  unpack whisper "$WHISPER_BUILD" "https://github.com/ggml-org/whisper.cpp/releases/download/$WHISPER_BUILD/whisper-bin-ubuntu-$ARCH.tar.gz" "$WHISPER_SUM" "$WHISPER_SIZE"
+  fetch "$HF_WHISPER/ggml-base-q8_0.bin" c577b9a86e7e048a0b7eada054f4dd79a56bbfa911fbdacf900ac5b567cbb7d9 81768585 "$SHARE/models/ggml-base-q8_0.bin"
+  fetch "$HF_VAD/ggml-silero-v6.2.0.bin" 2aa269b785eeb53a82983a20501ddf7c1d9c48e33ab63a41391ac6c9f7fb6987 885098 "$SHARE/models/ggml-silero-v6.2.0.bin"
+}
+
+# The daemon is up and answers a search (any search returns at least the web row).
+answers() { timeout 10 "$SS" search doctor --json 2>/dev/null | jq -e '.rows | length > 0' >/dev/null; }
 
 # Installed for real, not just Omarchy's install-on-first-run stub (running a
 # stub would install the agent).
@@ -149,7 +164,7 @@ opencode_mcp() {
 
 agents() {
   local a d got=()
-  for a in claude codex gemini copilot opencode; do
+  for a in "${AGENTS[@]}"; do
     if real "$a" && "${a}_mcp" "$1"; then got+=("$a"); fi
   done
   while read -r d; do
@@ -195,14 +210,28 @@ install_all() {
   ((EUID)) || die "run this as your own user, not root"
   local c u
   for c in curl sha256sum tar jq systemctl; do command -v "$c" >/dev/null || die "needs $c"; done
+  # The search box runs this when it cannot connect. A daemon that is up, or
+  # still starting, is left running.
+  if ((PROGRESS)) && systemctl --user -q is-active superspace.service; then
+    for _ in 1 2 3 4 5; do
+      answers && { say ready "Super Space is running"; return; }
+      sleep 1
+    done
+  fi
   case $(uname -m) in
-  aarch64) ARCH=arm64 LLAMA_SIZE=14020840 LLAMA_SUM=29cfa0befe843259ac4ee276860e7fb62839d737dc0e5e46b3ae53f8ba5d9783 ;;
-  x86_64) ARCH=x64 LLAMA_SIZE=17968484 LLAMA_SUM=99f83b15cea9a4fb8945516c276b5f42b11608f82104fc6fa98a541cac826de7 ;;
+  aarch64)
+    ARCH=arm64 LLAMA_SIZE=14020840 LLAMA_SUM=29cfa0befe843259ac4ee276860e7fb62839d737dc0e5e46b3ae53f8ba5d9783
+    WHISPER_SIZE=4608377 WHISPER_SUM=6b95ebfc60447df48e70ef00a73bdc3f41679ed2d01ef465827206a2ff325149
+    ;;
+  x86_64)
+    ARCH=x64 LLAMA_SIZE=17968484 LLAMA_SUM=99f83b15cea9a4fb8945516c276b5f42b11608f82104fc6fa98a541cac826de7
+    WHISPER_SIZE=10364195 WHISPER_SUM=a72becf15d7917f990f6313867a52638b82b7f9ef237fb0c980dac56a135781c
+    ;;
   *) die "Super Space runs on aarch64 and x86_64, not $(uname -m)" ;;
   esac
 
   install_binary
-  install_llama
+  unpack llama "$LLAMA_BUILD" "https://github.com/ggml-org/llama.cpp/releases/download/$LLAMA_BUILD/llama-$LLAMA_BUILD-bin-ubuntu-$ARCH.tar.gz" "$LLAMA_SUM" "$LLAMA_SIZE"
   fetch "$HF/$MODEL" 2188ac1deca4b77dffefd603c2776a9d76d9d74ec01841392982ebb840b09135 309855456 "$SHARE/models/$MODEL"
   fetch "$HF/$MMPROJ" c4a8a52691ecef40618438928bdf9e68379b854e24166f292592353db0aab64f 554821024 "$SHARE/models/$MMPROJ"
   install_stt
@@ -232,29 +261,45 @@ uninstall() {
   say removed "Super Space removed; your preferences stay in ~/.config/superspace. Remove the plugin with: omarchy plugin remove $PLUGIN_ID"
 }
 
-status() {
-  local bad=0 u d
-  row() {
+# The file each agent keeps its MCP servers in.
+mcp_config() {
+  case $1 in
+  claude) echo ~/.claude.json ;;
+  codex) echo ~/.codex/config.toml ;;
+  gemini) echo ~/.gemini/settings.json ;;
+  copilot) echo ~/.copilot/mcp-config.json ;;
+  opencode) echo ~/.config/opencode/opencode.json ;;
+  esac
+}
+
+runs() { [[ $("$SS" 2>&1) == *"usage: superspace serve"* ]]; }
+whisper_runs() { "$SHARE/whisper/whisper-cli" -h && [[ -s $SHARE/models/ggml-base-q8_0.bin && -s $SHARE/models/ggml-silero-v6.2.0.bin ]]; }
+skills_linked() { local d; while read -r d; do [[ -e $d/superspace ]] || return 1; done < <(skill_dirs); }
+
+doctor() {
+  local bad=0 a
+  check() {
     local label=$1
     shift
-    if "$@" >/dev/null 2>&1; then echo "  ok  $label"; else echo "  --  $label"; bad=1; fi
+    if "$@" >/dev/null 2>&1; then echo "  ok    $label"; else echo "  FAIL  $label"; bad=1; fi
   }
-  row "daemon $BIN" test -x "$BIN"
-  row "llama.cpp $LLAMA_BUILD" grep -qx "$LLAMA_BUILD" "$SHARE/llama/.build"
-  row "model $MODEL" test -f "$SHARE/models/$MODEL"
-  row "model $MMPROJ" test -f "$SHARE/models/$MMPROJ"
-  row "command $SS" test -x "$SS"
-  for u in "${UNITS[@]}"; do row "$u running" systemctl --user is-active --quiet "$u"; done
-  row "socket" test -S "${XDG_RUNTIME_DIR:-/run/user/$UID}/superspace.sock"
-  row "Super+Space bound" bound
-  while read -r d; do row "skill in $d" test -L "$d/superspace"; done < <(skill_dirs)
+  check "superspace runs" runs
+  check "query model server healthy (port 47801)" curl -fsm 3 http://127.0.0.1:47801/health
+  check "index model server healthy (port 47802)" curl -fsm 3 http://127.0.0.1:47802/health
+  check "daemon answers a search" answers
+  check "speech to text runs (whisper.cpp $WHISPER_BUILD)" whisper_runs
+  check "agent skill linked" skills_linked
+  for a in "${AGENTS[@]}"; do
+    if real "$a"; then check "MCP server registered with $a" grep -qF "\"$SS\"" "$(mcp_config "$a")"; fi
+  done
+  ((!bad)) || echo "To repair: superspace-setup"
   return "$bad"
 }
 
 MODE=install_all YES=0 PROGRESS=0 DEV_BINARY=
 while (($#)); do
   case $1 in
-  status | uninstall) MODE=$1 ;;
+  doctor | uninstall) MODE=$1 ;;
   bind) MODE=bind_key YES=1 ;;
   unbind) MODE=unbind_key ;;
   --yes | -y) YES=1 ;;
@@ -264,7 +309,7 @@ while (($#)); do
     [[ -x $DEV_BINARY ]] || die "not an executable: $2"
     shift
     ;;
-  -h | --help) sed -n '2,15s/^# \{0,1\}//p' "${BASH_SOURCE[0]}" && exit 0 ;;
+  -h | --help) sed -n '2,/^$/s/^# \{0,1\}//p' "${BASH_SOURCE[0]}" && exit 0 ;;
   *) die "unknown argument: $1 (see --help)" ;;
   esac
   shift

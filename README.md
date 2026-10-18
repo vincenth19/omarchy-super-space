@@ -14,14 +14,17 @@ best match first.
 
 ```bash
 omarchy plugin add https://github.com/vincenth19/omarchy-super-space --enable
-~/.config/omarchy/plugins/io.github.vincenth19.superspace/bin/superspace-setup
 ```
 
-The second command downloads the model and the search engine (about 900 MB,
-once), starts the services, sets up your coding agents and asks whether
-Super+Space should open Super Space. If you skip it, the search box runs the
-same setup the first time you open it. Run it again any time to repair or
-update; `superspace-setup status` shows what is installed and running.
+The first time you open Super Space it finishes setting itself up: it
+downloads the model, the search engine and speech to text (about 1 GB, once)
+with the progress in the box, starts the services, sets up your coding agents
+and asks whether Super+Space should open it. Until then, open it with
+`omarchy-shell shell toggle io.github.vincenth19.superspace '{}'`.
+
+Prefer a terminal? `~/.config/omarchy/plugins/io.github.vincenth19.superspace/bin/superspace-setup`
+does the same setup there. Run `superspace-setup` again any time to repair or
+update, and `superspace-setup doctor` to check that each piece works.
 
 Needs Omarchy 4 on aarch64 or x86_64. No GPU, no sudo, no account.
 
@@ -134,3 +137,5 @@ MIT. See [LICENSE](LICENSE).
 - [EmbeddingGemma 2](https://huggingface.co/ggml-org/embeddinggemma-2-GGUF)
   by Google: one model for text, images and audio.
 - [llama.cpp](https://github.com/ggml-org/llama.cpp) by ggml-org, which runs it.
+- [whisper.cpp](https://github.com/ggml-org/whisper.cpp) by ggml-org, with
+  OpenAI's Whisper base model and the Silero voice detector, for spoken words.

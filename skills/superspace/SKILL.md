@@ -67,8 +67,8 @@ A result row looks like:
   not offer near misses as answers.
 - File keys are `file:` plus the path relative to `$HOME`.
 
-If `superspace` is not running, `superspace-setup status` shows what is
-missing; the user can run `superspace-setup` to repair it.
+If `superspace` is not running, `superspace-setup doctor` shows which piece
+fails; the user can run `superspace-setup` to repair it.
 
 ## Preferences
 
