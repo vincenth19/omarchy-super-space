@@ -1,8 +1,8 @@
 //! Omarchy's clipboard history, and where each clip was copied from.
-use crate::{ago, apps, history, now, read_json, sha1, text_part, xdg};
+use crate::{ago, apps, history, now, read_json, sha1, xdg};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use ss_core::{Action, Doc, Embed, Kind, Locator, Part};
+use ss_core::{Action, Doc, Embed, Kind, Locator, Part, doc_text};
 use std::collections::HashMap;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
@@ -77,10 +77,23 @@ fn text_doc(text: String, sources: &HashMap<String, Source>, urls: &HashMap<Stri
         Some(s) => join(&[&format!("from {}", s.app), if page == s.app { "" } else { page }, &ago(now - s.at)]),
         None => "Clipboard".into(),
     };
-    // Embedded as "title: Chromium · Meetup notes · https://… | text: <clip>".
-    let context = src.map_or(String::new(), |s| join(&[&s.app, page, url]));
     let title = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").chars().take(120).collect();
-    let (stamp, parts) = text_part(&context, text.chars().take(2000).collect());
+    let body: String = text.chars().take(2000).collect();
+    // On the Pi a bare link, command or path sat at 0.67-0.70 to nonsense
+    // queries. A link copied in a browser embeds as "title: <page> | text:
+    // <link>" (closer to the page's topic than "Chromium · <page>" or "link to
+    // <site>"), any other link as "link to <site>" when the site is a name;
+    // commands, paths and codes are keywords only. Prose embeds as
+    // "title: Chromium · Meetup notes · https://… | text: <clip>".
+    let tab = src.filter(|s| browser(&s.class) && !page.is_empty()).map(|_| page);
+    let input = match (link_site(&text), tab) {
+        (Some(_), Some(tab)) => Some(doc_text(tab, &body)),
+        (Some(site), None) => (site.contains('.') && site.contains(|c: char| c.is_ascii_alphabetic())).then(|| doc_text("", &format!("link to {site}"))),
+        (None, _) if bare(&text) => None,
+        (None, _) => Some(doc_text(&src.map_or(String::new(), |s| join(&[&s.app, page, url])), &body)),
+    };
+    let stamp = sha1(input.as_deref().unwrap_or(&body));
+    let parts = vec![Part { text: body, locator: Locator::default(), embed: input.map_or(Embed::None, Embed::Text) }];
     let icon = src.map_or("", |s| s.icon.as_str());
     Doc {
         key: format!("clip:{hash}"),
@@ -109,6 +122,20 @@ fn image_doc(c: Clip) -> Doc {
         names: Vec::new(),
         parts: vec![Part { text: String::new(), locator: Locator::default(), embed: Embed::Image(c.path.into()) }],
     }
+}
+
+/// "github.com" for a clip that is only the link "https://www.github.com/a/b".
+fn link_site(text: &str) -> Option<String> {
+    let t = text.trim();
+    let link = (t.starts_with("https://") || t.starts_with("http://")) && !t.contains(char::is_whitespace);
+    link.then(|| history::short(t).split(['/', '?', '#', ':']).next().unwrap_or_default().to_string())
+}
+
+/// One line that is mostly not words: a command, a path or a code ("ssh pi@10.0.0.42 -p 2222").
+fn bare(text: &str) -> bool {
+    let toks: Vec<&str> = text.split_whitespace().collect();
+    let words = toks.iter().filter(|t| t.trim_end_matches([',', '.', ':', ';', '!', '?']).chars().all(char::is_alphabetic)).count();
+    !text.trim().contains('\n') && words * 2 <= toks.len()
 }
 
 /// Chromium windows and Chromium web apps ("chrome-x.com__-Default").
@@ -229,20 +256,26 @@ mod tests {
             {"type":"text","text":"#c0644c"},
             {"type":"text","text":"   "},
             {"type":"image","path":"/nonexistent/a.png","mime":"image/png","capturedAt":"Friday 22:57"},
-            {"type":"other"}
+            {"type":"other"},
+            {"type":"text","text":"Doors open at 6pm, talks at 6:30"},
+            {"type":"text","text":"https://github.com/vincenth19/omarchy-super-space"},
+            {"type":"text","text":"http://10.0.0.42:8080/admin"},
+            {"type":"text","text":"ssh pi@10.0.0.42 -p 2222"},
+            {"type":"text","text":"~/Documents/lease.pdf"}
         ]"##,
         )
         .unwrap();
         let sources: HashMap<String, Source> = [
             (sha1("https://omarchy.org/plugins"), src("Chromium", "chromium", "Meetup notes - Chromium", 1000 - 7200)),
             (sha1("  \n  bunx wrangler deploy\nsecond line"), src("Ghostty", "com.mitchellh.ghostty", "Ghostty", 1000 - 90)),
+            (sha1("Doors open at 6pm, talks at 6:30"), src("Chromium", "chromium", "Meetup notes - Chromium", 1000)),
         ]
         .into();
         let urls: HashMap<String, String> = [("Meetup notes".to_string(), "https://docs.example/meetup".to_string())].into();
         let docs = clip_docs(list, &sources, &urls, 1000);
         let rows: Vec<(&str, &str, &str)> = docs.iter().map(|d| (d.title.as_str(), d.subtitle.as_str(), d.icon.as_str())).collect();
         assert_eq!(
-            rows,
+            rows[..3],
             [
                 ("https://omarchy.org/plugins", "from Chromium · Meetup notes · 2 h ago", "chromium"),
                 ("bunx wrangler deploy", "from Ghostty · 1 min ago", "com.mitchellh.ghostty"),
@@ -251,10 +284,22 @@ mod tests {
         );
         assert_eq!(docs[0].key, "clip:23fa0cd44b128e1508c384b57a8b18e7264f1b54");
         assert_eq!(docs[0].action, Action::Paste { text: "https://omarchy.org/plugins".into() });
-        let Embed::Text(t) = &docs[0].parts[0].embed else { panic!() };
-        assert_eq!(t, "title: Chromium · Meetup notes · https://docs.example/meetup | text: https://omarchy.org/plugins");
-        let Embed::Text(t) = &docs[2].parts[0].embed else { panic!() };
-        assert_eq!(t, "title: none | text: #c0644c");
+        // Links by their page or site; commands, paths, codes and links to bare addresses keywords only.
+        let embeds: Vec<Option<&str>> = docs.iter().map(|d| if let Embed::Text(t) = &d.parts[0].embed { Some(t.as_str()) } else { None }).collect();
+        assert_eq!(
+            embeds,
+            [
+                Some("title: Meetup notes | text: https://omarchy.org/plugins"),
+                Some("title: Ghostty · Ghostty | text:   \n  bunx wrangler deploy\nsecond line"),
+                None,
+                Some("title: Chromium · Meetup notes · https://docs.example/meetup | text: Doors open at 6pm, talks at 6:30"),
+                Some("title: none | text: link to github.com"),
+                None,
+                None,
+                None,
+            ]
+        );
+        assert_eq!(docs[7].parts[0].text, "~/Documents/lease.pdf");
     }
 
     #[test]
