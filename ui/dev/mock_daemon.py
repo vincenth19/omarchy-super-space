@@ -9,13 +9,16 @@ Canned queries (substring match, case-insensitive):
   lease / contract / pdf      PDF hit with pages and marked snippet
   novel / epub                EPUB hit with chapters
   dog / golden / park         video with moments + thumbs, photo, audio (one moment past an hour)
-  awkward / smile / emoji     emoji rows
+  awkward / smile / emoji     11 emoji rows, the emoji-picker setting after the ninth
   cm / usd / idr / % / 2+2    instant answer (plus whatever else matches)
   qwxz / nothing              empty: true, only the web row
   slow <query>                the same, with the final phase after 1.5 s instead of 0.12 s
   anything else               apps and settings by prefix; the final phase puts a meaning hit on top
 
-  python3 ui/dev/mock_daemon.py [--sock PATH] [--thumbs DIR] [--log FILE]
+  python3 ui/dev/mock_daemon.py [--sock PATH] [--thumbs DIR] [--log FILE] [--indexing SECONDS]
+
+With --indexing, every search response carries "progress" {done, total, stage}
+for that many seconds after start, as a first index would; then none.
 
 Refuses to start when something already listens on the socket.
 """
@@ -131,11 +134,15 @@ def respond(q, thumbs):
                      {"locator": {"t": 3725.0, "t_end": 3740.0}, "score": 0.55, "text": "we took the dog home after the park"}])
         return [web(q)], [video, photo, audio, web(q)], answer, False, delay
     if any(w in s for w in ("awkward", "smile", "emoji")):
-        emoji = [("😬", "grimacing face", "awkward, nervous"), ("😅", "grinning face with sweat", "phew, relief"),
-                 ("🙃", "upside-down face", "silly, sarcasm")]
-        rows = [row("emoji:" + e, "emoji", name, kw, "", {"type": "paste", "text": e}, 0.7, "meaning") for e, name, kw in emoji]
-        rows.append(row("setting:emoji-picker", "setting", "Open emoji picker", "Omarchy", "face-smile",
-                        {"type": "run", "argv": ["omarchy-menu", "emoji"]}, 0.3, "keyword"))
+        emoji = [("😬", "Grimacing face", "awkward · nervous"), ("😅", "Grinning face with sweat", "phew · relief"),
+                 ("🙃", "Upside-down face", "silly · sarcasm"), ("😳", "Flushed face", "awkward · embarrassed"),
+                 ("😶", "Face without mouth", "awkward · blank"), ("😑", "Expressionless face", "awkward · meh"),
+                 ("😐", "Neutral face", "awkward · deadpan"), ("🫠", "Melting face", "embarrassed · melt"),
+                 ("😕", "Confused face", "confused · dunno"), ("🤷", "Person shrugging", "dunno · idk"),
+                 ("🙈", "See-no-evil monkey", "embarrassed · oops")]
+        rows = [row("emoji:" + e, "emoji", name, kw, e, {"type": "paste", "text": e}, 0.7, "meaning") for e, name, kw in emoji]
+        rows.insert(9, row("setting:emoji-picker", "setting", "Open emoji picker", "Omarchy", "face-smile",
+                           {"type": "run", "argv": ["omarchy-menu", "emoji"]}, 0.3, "keyword"))
         return rows[:1] + [web(q)], rows + [web(q)], answer, False, delay
     names = [row("app:" + i, "app", n, g, i, {"type": "launch", "desktop_id": i}, 0.8)
              for i, n, g in APPS if s and (n.lower().startswith(s) or g.lower().startswith(s))]
@@ -171,6 +178,14 @@ def make_thumbs(arg):
     return out
 
 
+def progress(server):
+    """While --indexing runs, how far a pretend first index has got."""
+    f = (time.time() - server.started) / server.indexing if server.indexing else 1
+    if f >= 1:
+        return None
+    return {"done": int(f * 2800), "total": 2800, "stage": ["apps and settings", "documents", "emoji", "photos"][int(f * 4)]}
+
+
 class Handler(socketserver.StreamRequestHandler):
     def handle(self):
         lock = threading.Lock()
@@ -194,7 +209,8 @@ class Handler(socketserver.StreamRequestHandler):
                 t0 = time.perf_counter()
                 instant, final, answer, empty, delay = respond(q, self.server.thumbs)
                 ms = (time.perf_counter() - t0) * 1000
-                base = {"id": rid, "empty": empty, **({"answer": answer} if answer else {})}
+                p = progress(self.server)
+                base = {"id": rid, "empty": empty, **({"answer": answer} if answer else {}), **({"progress": p} if p else {})}
                 send({**base, "empty": empty or all(r["kind"] == "web" for r in instant), "phase": "instant", "rows": instant, "timing": {"instant_ms": ms, "embed_ms": 0, "total_ms": ms}})
                 threading.Timer(delay, send, [{**base, "phase": "final", "rows": final,
                                                "timing": {"instant_ms": ms, "embed_ms": delay * 1000, "total_ms": delay * 1000}}]).start()
@@ -219,6 +235,7 @@ def main():
     ap.add_argument("--sock", default=os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "superspace.sock"))
     ap.add_argument("--thumbs", help="folder of *-224.jpg or *.png thumbnails (default: generated PNGs)")
     ap.add_argument("--log", help="also append every request to this file")
+    ap.add_argument("--indexing", type=float, default=0, help="send progress for this many seconds after start")
     a = ap.parse_args()
     probe = socket.socket(socket.AF_UNIX)
     try:
@@ -232,7 +249,7 @@ def main():
         os.unlink(a.sock)
     server = socketserver.ThreadingUnixStreamServer(a.sock, Handler)
     server.daemon_threads = True
-    server.thumbs, server.log = make_thumbs(a.thumbs), a.log
+    server.thumbs, server.log, server.indexing, server.started = make_thumbs(a.thumbs), a.log, a.indexing, time.time()
     ino = os.stat(a.sock).st_ino
     signal.signal(signal.SIGTERM, signal.default_int_handler)  # kill PID still cleans up
     print("mock_daemon: listening on", a.sock, flush=True)

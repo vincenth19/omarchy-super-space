@@ -4,8 +4,9 @@ import qs.Ui
 
 // One result (a `Row` from crates/core): icon, title, subtitle, the snippet
 // with its marked words, and the row's hits: page chips, or for video and
-// audio the moments in time order, as thumbnails when there are any. Every
-// colour, font, size and radius comes from Omarchy's theme (Color, Style).
+// audio the moments in time order, as thumbnails when there are any. An emoji
+// row is a strip: its hits are emoji rows, drawn large, the picked one named
+// under them. Every colour, font, size and radius comes from Omarchy's theme.
 Column {
   id: root
 
@@ -17,11 +18,11 @@ Column {
   property bool notice: false    // nothing local matched: say so above this (web) row
   signal clicked()
 
-  readonly property var hits: item.hits || []
-  readonly property var order: item._order || []
-  readonly property bool thumbs: hits.some(function(h) { return !!h.thumb })
   readonly property bool emoji: item.kind === "emoji"
-  readonly property int iconSize: item.kind === "image" ? Style.space(56) : emoji ? Style.space(36) : Style.space(28)
+  readonly property var hits: emoji ? [] : item.hits || []
+  readonly property var order: emoji ? [] : item._order || []
+  readonly property bool thumbs: hits.some(function(h) { return !!h.thumb })
+  readonly property int iconSize: item.kind === "image" ? Style.space(56) : Style.space(28)
   readonly property color ink: selected ? Color.menu.selectedText : Color.menu.text
   // Secondary text is the theme's text colour dimmed, as in Omarchy's menu.
   readonly property real dim: 0.52
@@ -85,11 +86,10 @@ Column {
       id: glyph
       x: Style.spacing.rowPaddingX
       y: Style.spacing.lg
-      width: Math.max(root.iconSize, Style.space(36))
+      width: root.emoji ? 0 : Math.max(root.iconSize, Style.space(36))
       height: root.iconSize
 
       Image {
-        visible: !root.emoji
         anchors.centerIn: parent
         width: root.iconSize
         height: root.iconSize
@@ -98,25 +98,42 @@ Column {
         fillMode: root.item.kind === "image" ? Image.PreserveAspectCrop : Image.PreserveAspectFit
         asynchronous: true
       }
-      Text {
-        visible: root.emoji
-        anchors.centerIn: parent
-        text: String(root.item.key || "").slice(6) // "emoji:<emoji>"
-        font.pixelSize: Style.font.displayLarge
-      }
     }
 
     Column {
       id: body
       anchors.left: glyph.right
-      anchors.leftMargin: Style.spacing.xxl
+      anchors.leftMargin: root.emoji ? 0 : Style.spacing.xxl
       anchors.right: kind.left
       anchors.rightMargin: Style.spacing.lg
       y: Style.spacing.lg
       spacing: Style.spacing.xxs
 
+      Row {
+        visible: root.emoji
+        spacing: Style.spacing.xs
+        Repeater {
+          model: root.emoji ? root.item.hits : []
+          BorderSurface {
+            required property var modelData
+            required property int index
+            readonly property bool picked: root.selected && index === root.hit
+            width: Style.space(44)
+            height: width
+            radius: Math.min(Style.cornerRadius, Style.space(6))
+            color: picked ? Style.normalFillFor(Color.menu.text, Color.accent) : "transparent"
+            borderSpec: picked ? Border.flat(Color.accent, Style.space(2)) : Border.none()
+            Text {
+              anchors.centerIn: parent
+              text: String(modelData.key).slice(6) // "emoji:<emoji>"
+              font.pixelSize: Style.font.displayLarge
+            }
+          }
+        }
+      }
       Text {
         width: parent.width
+        visible: !root.emoji
         text: root.item.title || ""
         textFormat: Text.PlainText
         elide: Text.ElideRight
@@ -128,7 +145,7 @@ Column {
       Text {
         width: parent.width
         visible: text.length > 0
-        text: root.item.subtitle || ""
+        text: root.emoji ? (root.item.hits[root.hit] || root.item.hits[0]).title : root.item.subtitle || ""
         textFormat: Text.PlainText
         elide: Text.ElideMiddle
         color: Color.menu.text

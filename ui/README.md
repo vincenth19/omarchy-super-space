@@ -46,7 +46,7 @@ Basilica.
 
 Type to search · ↑/↓ or Ctrl+N/P move · Enter open (on an answer: copy) ·
 Ctrl+Enter the alternative (show in folder, or copy) · ←/→ step through a row's pages or
-moments (with fewer than two, they move the text cursor) · Tab list a row's
+moments, or pick an emoji in a strip (with fewer than two, they move the text cursor) · Tab list a row's
 hits · Ctrl+1…9 open row N · Ctrl+C copy the answer, path or URL (copies the
 selected text if there is any) · Ctrl+U clear · Esc close.
 
@@ -68,6 +68,7 @@ over SSH set `XDG_RUNTIME_DIR` and `OMARCHY_PATH`.) `state` returns:
  "empty":false,"answer":null,"rows":[{"key":"…","kind":"file","title":"…","hits":3},…],
  "activated":{"op":"activate","id":10,"key":"…","q":"lease","hit":1,"alt":false},
  "perf":[["instant",3],["final",4]],"setup":null,"askBind":false,
+ "progress":{"done":1240,"total":2800,"stage":"photos"},
  "theme":{"background":"#1e1913","text":"#ebe1cc"}}
 ```
 
@@ -75,7 +76,17 @@ over SSH set `XDG_RUNTIME_DIR` and `OMARCHY_PATH`.) `state` returns:
 `"answer"`); `hit` indexes the selected row's `hits` (null without hits);
 `activated` is the last `activate` sent; `perf` is the UI's own time per
 applied response (ms, model update and layout) since it opened; `setup` is
-setup's last progress line; `theme` the menu colours the UI draws with.
+setup's last progress line; `progress` is the latest response's indexing
+progress (null when it had none); `theme` the menu colours the UI draws with.
+
+Consecutive emoji rows are drawn as one strip of up to 8 (the rest are
+dropped). In `state` a strip is one row: `key` and `kind` of its first emoji,
+`hits` the number of emoji; `hit` is the picked emoji and `selectedKey` its
+key, which Enter, Ctrl+1…9 and Ctrl+C use. The subtitle names the picked emoji.
+
+While a response carries `"progress": {done, total, stage}`, a quiet line
+above the key hints says "Indexing · 1,240 of 2,800 · photos" (`stage`, what
+is embedded now, verbatim); it goes with the first response without it.
 
 Hits are labelled p. N (ch. N in an EPUB, whose parts are chapters), slide N,
 sheet · row N, line N, or a time as m:ss (h:mm:ss from an hour on). While
@@ -96,11 +107,11 @@ clear that cache (`Qt.clearComponentCache` does not exist in QML on Qt 6.11).
 ## Mock daemon
 
 ```
-python3 ui/dev/mock_daemon.py [--sock PATH] [--thumbs DIR] [--log FILE]
+python3 ui/dev/mock_daemon.py [--sock PATH] [--thumbs DIR] [--log FILE] [--indexing SECONDS]
 ```
 
 Python stdlib only; canned two-phase answers for `lease`, `novel` (EPUB chapters), `golden retriever`,
-`awkward`, `5'11" in cm`, `qwxz` (empty), `slow <query>` (final after 1.5 s)
-and app/setting prefixes. Point a dev shell at it with `SUPERSPACE_SOCK=PATH`
+`awkward` (11 emoji, the picker setting after the ninth), `5'11" in cm`, `qwxz` (empty), `slow <query>` (final after 1.5 s)
+and app/setting prefixes; `--indexing` adds `progress` to every response for that many seconds. Point a dev shell at it with `SUPERSPACE_SOCK=PATH`
 when the real daemon has the default socket. It refuses to start when something already listens
 on the socket, and removes the socket on exit only if it is still its own.

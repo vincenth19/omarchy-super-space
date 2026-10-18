@@ -35,9 +35,10 @@ Item {
   property bool expanded: false
   property var activated: null  // the last activate sent, for the test bench
   property var perf: []         // [phase, ms] per response since opening, for the bench
+  property var indexing: null   // the latest response's {done, total, stage}, while the daemon is still indexing
   readonly property int offset: answer ? 1 : 0
   readonly property var current: sel >= offset ? rows[sel - offset] || null : null
-  readonly property string selectedKey: current ? current.key : answer ? "answer" : ""
+  readonly property string selectedKey: (target(sel) || {}).key || ""
 
   function open(payloadJson) {
     perf = []
@@ -148,7 +149,7 @@ Item {
   // time order. The web row is always last, whatever arrives.
   function order(hits) {
     var at = function(h) { var l = h.locator || {}; return l.t ?? l.page ?? l.slide ?? l.row ?? l.line ?? 0 }
-    return hits.map(function(h, i) { return i }).sort(function(a, b) { return at(hits[a]) - at(hits[b]) })
+    return hits.map(function(h, i) { return i }).sort(function(a, b) { return at(hits[a]) - at(hits[b]) || a - b })
   }
 
   // The list never shrinks while typing: an instant phase puts its rows on top
@@ -162,8 +163,17 @@ Item {
     var all = msg.rows.filter(local).concat(settled.rows.filter(function(r) { return local(r) && keys.indexOf(r.key) < 0 }))
     empty = settled.empty === true && !all.length
     all = all.concat(msg.rows.filter(function(r) { return !local(r) }))
+    // Consecutive emoji make one strip of up to 8: a row whose hits are the emoji.
+    all = all.reduce(function(out, r) {
+      var last = out[out.length - 1]
+      if (r.kind !== "emoji") out.push(r)
+      else if (!last || last.kind !== "emoji") out.push({ key: r.key, kind: "emoji", hits: [r] })
+      else if (last.hits.length < 8) last.hits.push(r)
+      return out
+    }, [])
     all.forEach(function(r) { r._order = order(r.hits || []) })
     answer = msg.answer || settled.answer || null
+    indexing = msg.progress || null
     rows = all
     phase = msg.phase
     var found = keep === "answer" ? (answer ? 0 : -1) : rows.findIndex(function(r) { return r.key === keep })
@@ -201,14 +211,20 @@ Item {
     if (text) Quickshell.execDetached(["wl-copy", "--", String(text)])
   }
 
+  // What item i runs: the answer, a row, or in an emoji strip the emoji picked with ←/→.
+  function target(i) {
+    var row = i < offset ? { key: "answer" } : rows[i - offset]
+    return row && row.kind === "emoji" ? row.hits[i === sel ? hit : 0] : row
+  }
+
   function copyText() {
-    var a = current ? current.action || {} : {}
-    return !current ? (answer ? answer.copy : "") : a.path || a.url || a.text || current.title
+    var r = target(sel) || {}, a = r.action || {}
+    return r.key === "answer" ? answer.copy : a.path || a.url || a.text || r.title
   }
 
   // The daemon runs it; alt (Ctrl+Enter) is the alternative: show in folder, or copy.
   function activate(i, alt) {
-    var row = i < offset ? { key: "answer" } : rows[i - offset]
+    var row = target(i)
     if (!row) return
     var request = { op: "activate", id: seq + 1, key: row.key, q: field.text, hit: (row.hits || []).length ? (i === sel ? hit : 0) : null, alt: !!alt }
     activated = request
@@ -269,7 +285,7 @@ Item {
         selected: root.sel - root.offset, selectedKey: root.selectedKey, hit: root.current && (root.current.hits || []).length ? root.hit : null,
         expanded: root.expanded, empty: root.empty, answer: root.answer,
         rows: root.rows.map(function(r) { return { key: r.key, kind: r.kind, title: r.title, hits: (r.hits || []).length } }),
-        activated: root.activated, perf: root.perf, setup: root.progress, askBind: root.askBind,
+        activated: root.activated, perf: root.perf, setup: root.progress, askBind: root.askBind, progress: root.indexing,
         theme: { background: hex(Color.menu.background), text: hex(Color.menu.text) }
       })
     }
@@ -410,12 +426,24 @@ Item {
           }
         }
 
+        Text {  // still indexing: how far, and what is being embedded
+          readonly property var p: root.indexing || ({})
+          visible: !!root.indexing
+          leftPadding: Style.spacing.rowPaddingX
+          text: "Indexing · " + Number(p.done).toLocaleString(Qt.locale(), "f", 0) + " of " + Number(p.total).toLocaleString(Qt.locale(), "f", 0) + (p.stage ? " · " + p.stage : "")
+          textFormat: Text.PlainText
+          color: Color.menu.text
+          opacity: 0.52
+          font.family: Style.font.menuFamily
+          font.pixelSize: Style.font.caption
+        }
+
         Text {
           width: parent.width
           horizontalAlignment: Text.AlignRight
           rightPadding: Style.spacing.rowPaddingX
           visible: list.count > 0 || !!root.answer
-          text: "↵ open    ctrl ↵ reveal    ← → pages, moments    tab expand    ctrl 1–9 row    esc close"
+          text: "↵ open    ctrl ↵ reveal    ← → pages, moments, emoji    tab expand    ctrl 1–9 row    esc close"
           color: Color.menu.text
           opacity: 0.52
           font.family: Style.font.menuFamily
