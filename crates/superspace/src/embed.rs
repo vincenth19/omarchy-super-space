@@ -3,7 +3,7 @@
 
 use serde_json::{Value, json};
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 pub const DIM: usize = 768;
@@ -70,7 +70,8 @@ pub fn request(method: &str, url: &str, body: &[u8], timeout: Duration) -> Resul
     let rest = url.strip_prefix("http://").ok_or("only http:// URLs are supported")?;
     let (host, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
     let path = if path.is_empty() { "/" } else { path };
-    let mut s = TcpStream::connect(host).map_err(|e| format!("{host}: {e}"))?;
+    let addr = host.to_socket_addrs().map_err(|e| format!("{host}: {e}"))?.next().ok_or(format!("{host}: no address"))?;
+    let mut s = TcpStream::connect_timeout(&addr, timeout).map_err(|e| format!("{host}: {e}"))?;
     s.set_read_timeout(Some(timeout)).map_err(|e| e.to_string())?;
     s.set_write_timeout(Some(timeout)).map_err(|e| e.to_string())?;
     let mut req = format!(

@@ -149,7 +149,10 @@ fn compact(v: &Value) -> Value {
         .flatten()
         .map(|r| {
             let mut c = json!({"key": r["key"], "kind": r["kind"], "title": r["title"], "subtitle": r["subtitle"], "score": r["score"], "why": r["why"]});
-            if let Some(p) = r["action"]["path"].as_str().or(r["action"]["url"].as_str()) {
+            // History URLs go to agents without their query and fragment
+            // (login and reset tokens live there); the box still opens the full URL.
+            let url = r["action"]["url"].as_str().map(|u| if r["kind"] == "history" { u.split(['?', '#']).next().unwrap_or(u) } else { u });
+            if let Some(p) = r["action"]["path"].as_str().or(url) {
                 c["open"] = json!(p);
             }
             if let Some(t) = r["snippet"]["text"].as_str() {

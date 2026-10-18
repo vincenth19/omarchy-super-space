@@ -112,7 +112,7 @@ impl Daemon {
     /// features have a weight.
     pub fn query_vec(&self, q: &str) -> Option<QVecs> {
         let qn = norm(q);
-        if qn.chars().filter(|c| !c.is_whitespace()).count() < 3 {
+        if !meaningful(&qn) {
             return None;
         }
         let w = *self.weights.read().unwrap();
@@ -130,7 +130,8 @@ impl Daemon {
             texts.extend(GENERIC_CAPTIONS.map(ss_core::query_text));
         }
         let inputs: Vec<Input> = texts.iter().map(|t| Input::Text(t)).collect();
-        let mut vecs = embed::embed(&self.cfg.query_url, &inputs, Duration::from_secs(5)).ok()?.into_iter();
+        let vecs = embed::embed(&self.cfg.query_url, &inputs, Duration::from_secs(5));
+        let mut vecs = vecs.map_err(|e| eprintln!("superspace: query server: {e:?}; searching names and keywords only")).ok()?.into_iter();
         let qv = QVecs { q: quantize(&vecs.next()?), photo: if photo { vecs.next().map(|v| quantize(&v)) } else { None } };
         if generic {
             let mean = vecs.fold(vec![0f32; embed::DIM], |acc, v| acc.iter().zip(v).map(|(a, b)| a + b).collect());
@@ -155,6 +156,8 @@ impl Daemon {
             }
         };
         let (rows, empty) = search::search(self, &s.q, s.limit, qv.as_ref(), s.kinds.as_deref());
+        // Meaning could not be asked (the query server is down or slow): never claim nothing matches.
+        let empty = empty && (phase == Phase::Instant || qv.is_some() || !meaningful(&s.q));
         let answer = ss_answers::answer(&s.q, self.rates.read().unwrap().as_ref(), now(), &self.tz);
         let total_ms = s.t0.elapsed().as_secs_f32() * 1000.0;
         let instant_ms = if phase == Phase::Instant { total_ms } else { instant_ms };
@@ -180,7 +183,7 @@ impl Daemon {
     }
 
     /// Every request except the two phases of a search on a connection.
-    pub fn handle(&self, req: Request) -> Response {
+    pub fn handle(self: &Arc<Self>, req: Request) -> Response {
         let (id, out) = match req {
             Request::Search { id, q, limit, kinds } => {
                 return self.search_response(&Search { id, q, limit, kinds, t0: Instant::now() }, Phase::Final, 0.0);
@@ -199,27 +202,38 @@ impl Daemon {
         }
     }
 
-    fn activate(&self, key: &str, q: &str, hit: Option<usize>, alt: bool) -> Result<Value> {
+    /// The action runs first, with only a query vector already at hand; learning from the
+    /// pick (it may embed, and waits for the index writer) follows on its own thread.
+    fn activate(self: &Arc<Self>, key: &str, q: &str, hit: Option<usize>, alt: bool) -> Result<Value> {
+        let learn = key != "answer" && !key.starts_with("web:");
         let (action, kind) = if key == "answer" {
             let a = ss_answers::answer(q, self.rates.read().unwrap().as_ref(), now(), &self.tz).context("no answer for this query")?;
             (Action::Copy { text: a.copy }, Kind::Web)
         } else if let Some(wq) = key.strip_prefix("web:") {
             (search::web_row(wq).action, Kind::Web)
         } else {
-            let qv = self.query_vec(q);
-            let row = search::pick(self, q, key, qv.as_ref())?;
+            let qv = self.qcache.lock().unwrap().get(&norm(q)).cloned();
+            let row = search::pick(self, q, key, qv.as_ref(), false)?;
             let mut action = row.action;
             if let (Action::Open { locator, .. }, Some(h)) = (&mut action, hit.and_then(|i| row.hits.get(i))) {
                 *locator = h.locator.clone();
             }
-            let p = Pick { key: key.to_string(), q: norm(q), ts: now() };
-            self.store.add_pick(&p)?;
-            self.picks.write().unwrap().push(p);
             (action, row.kind)
         };
         let action = if alt { alternative(action) } else { action };
         let argv = command(&action, kind);
         spawn(&argv)?;
+        if learn {
+            let (d, key, q) = (self.clone(), key.to_string(), q.to_string());
+            std::thread::spawn(move || {
+                let _ = search::pick(&d, &q, &key, d.query_vec(&q).as_ref(), true);
+                let p = Pick { key, q: norm(&q), ts: now() };
+                if let Err(e) = d.store.add_pick(&p) {
+                    eprintln!("superspace: saving a pick: {e:#}");
+                }
+                d.picks.write().unwrap().push(p);
+            });
+        }
         Ok(json!({ "action": action, "argv": argv }))
     }
 
@@ -267,21 +281,26 @@ impl Daemon {
         let (pending, pending_text, refused) = self.store.counts();
         // Before the index lock: progress and the media queue take the queue's lock first.
         let (progress, media_queue) = (self.progress(), self.media.lock().unwrap().len());
-        let mem = self.store.mem.read().unwrap();
-        let mut kinds: HashMap<String, usize> = HashMap::new();
-        for it in mem.items.values() {
-            *kinds.entry(kind_name(it.kind)).or_default() += 1;
-        }
+        // Slow probes before the index lock: a writer waiting behind a held read lock stalls every search.
+        let (query_server, index_server) = (embed::healthy(&self.cfg.query_url), embed::healthy(&self.cfg.index_url));
         let rss_mb = std::fs::read_to_string("/proc/self/status").ok().and_then(|s| {
             let kb: f64 = s.lines().find(|l| l.starts_with("VmRSS:"))?.split_whitespace().nth(1)?.parse().ok()?;
             Some((kb / 1024.0 * 10.0).round() / 10.0)
         });
+        let (items, parts, vectors, kinds) = {
+            let mem = self.store.mem.read().unwrap();
+            let mut kinds: HashMap<String, usize> = HashMap::new();
+            for it in mem.items.values() {
+                *kinds.entry(kind_name(it.kind)).or_default() += 1;
+            }
+            (mem.items.len(), mem.parts.len(), mem.rows.len(), kinds)
+        };
         json!({
             "version": env!("CARGO_PKG_VERSION"),
-            "items": mem.items.len(), "parts": mem.parts.len(), "vectors": mem.rows.len(),
+            "items": items, "parts": parts, "vectors": vectors,
             "pending": pending, "pending_text": pending_text, "refused": refused, "kinds": kinds,
             "indexing": self.busy.load(Ordering::Relaxed) > 0, "media_queue": media_queue, "progress": progress,
-            "query_server": embed::healthy(&self.cfg.query_url), "index_server": embed::healthy(&self.cfg.index_url),
+            "query_server": query_server, "index_server": index_server,
             "rss_mb": rss_mb, "prefs_error": *self.prefs_error.lock().unwrap(),
             "home": self.cfg.home, "state": self.cfg.state, "socket": self.cfg.sock, "preferences": self.cfg.prefs(),
             "roots": self.roots, "time_zone": self.tz, "rates": self.rates.read().unwrap().as_ref().map(|r| r.date.clone()),
@@ -303,7 +322,14 @@ fn home_tz() -> String {
         .unwrap_or_else(|| "UTC".into())
 }
 
+/// Meaning is asked for queries of 3+ letters: for one or two it is noise.
+fn meaningful(q: &str) -> bool {
+    q.chars().filter(|c| !c.is_whitespace()).count() >= 3
+}
+
 pub fn serve(cfg: Cfg) -> Result<()> {
+    // One daemon per index, decided before the database is opened (and maybe migrated).
+    let _lock = lock(&cfg.state)?;
     let d = Daemon::open(cfg)?;
     let listener = bind(&d.cfg.sock)?;
     remove_on_exit(&d.cfg.sock);
@@ -311,6 +337,14 @@ pub fn serve(cfg: Cfg) -> Result<()> {
     ingest::start(&d);
     listen(d, listener);
     Ok(())
+}
+
+/// An exclusive lock on the state folder, held while the daemon runs.
+pub fn lock(state: &Path) -> Result<std::fs::File> {
+    std::fs::create_dir_all(state)?;
+    let f = std::fs::File::create(state.join("daemon.lock"))?;
+    f.try_lock().map_err(|_| anyhow::anyhow!("another superspace is already serving {}", state.display()))?;
+    Ok(f)
 }
 
 pub fn bind(sock: &std::path::Path) -> Result<UnixListener> {
@@ -453,11 +487,15 @@ pub fn command(action: &Action, kind: Kind) -> Vec<String> {
     }
 }
 
+/// Asked once: xdg-mime takes ~37 ms on a Pi.
 fn evince_is_default() -> bool {
-    std::process::Command::new("xdg-mime")
-        .args(["query", "default", "application/pdf"])
-        .output()
-        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).to_lowercase().contains("evince"))
+    static E: OnceLock<bool> = OnceLock::new();
+    *E.get_or_init(|| {
+        std::process::Command::new("xdg-mime")
+            .args(["query", "default", "application/pdf"])
+            .output()
+            .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).to_lowercase().contains("evince"))
+    })
 }
 
 fn on_path(name: &str) -> bool {

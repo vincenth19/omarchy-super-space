@@ -21,7 +21,7 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 pub mod ext {
     pub use ss_files::{crawl, crawl_dir, doc as file_doc, icon, roots, wanted_in};
     pub use ss_media::{doc as media_doc, forget, is_media, lrc_owner, quick_doc, stamp as media_stamp};
-    pub use ss_sources::{apps, clips, emoji, history, settings, track_clip_sources, watch_paths};
+    pub use ss_sources::{apps, clips_checked, emoji, history_checked, settings, settings_checked, track_clip_sources, watch_paths};
 
     /// The default browser's desktop id, without ".desktop".
     pub fn default_browser() -> Option<String> {
@@ -48,10 +48,25 @@ pub struct FastQ {
 
 pub fn start(d: &Arc<Daemon>) {
     let (tx, rx) = channel();
+    let mut sources = ext::watch_paths();
+    sources.push(d.cfg.state.join("clip-sources.json"));
+    let _ = std::fs::create_dir_all(&d.cfg.config);
     match notify::recommended_watcher(move |e| {
         let _ = tx.send(e);
     }) {
-        Ok(w) => *d.watcher.lock().unwrap() = Some(w),
+        Ok(mut w) => {
+            // The sources' files through their folders (they may not exist yet) and the
+            // preferences, before the first scan: on macOS each change of watches restarts the
+            // stream, and what changes meanwhile is lost.
+            let mut dirs = HashSet::new();
+            for p in sources.iter().chain([&d.cfg.prefs()]) {
+                let dir = if p.is_dir() { p.clone() } else { p.parent().map(Path::to_path_buf).unwrap_or_default() };
+                if dir.is_dir() && dirs.insert(dir.clone()) {
+                    let _ = w.watch(&dir, notify::RecursiveMode::NonRecursive);
+                }
+            }
+            *d.watcher.lock().unwrap() = Some(w);
+        }
         Err(e) => eprintln!("superspace: no file watcher: {e}"),
     }
     {
@@ -68,7 +83,7 @@ pub fn start(d: &Arc<Daemon>) {
     run(media_loop);
     run(embed_loop);
     let d2 = d.clone();
-    std::thread::spawn(move || watch(d2, rx));
+    std::thread::spawn(move || watch(d2, rx, sources));
     ext::track_clip_sources(&d.cfg.state);
     run(|d| *d.browser.write().unwrap() = ext::default_browser());
     run(|d| loop {
@@ -98,6 +113,26 @@ fn excluded(d: &Daemon, p: &Path) -> bool {
     })
 }
 
+/// Indexing threads run at nice 19 with idle I/O (Linux sets both per thread, and the tools a
+/// thread starts inherit them), so searches and the desktop come first.
+fn background() {
+    #[cfg(target_os = "linux")]
+    {
+        unsafe extern "C" {
+            fn gettid() -> i32;
+            fn setpriority(which: i32, who: u32, prio: i32) -> i32;
+            fn syscall(n: i64, ...) -> i64;
+        }
+        let ioprio_set: i64 = if cfg!(target_arch = "x86_64") { 251 } else { 30 };
+        // SAFETY: both only change this thread's own scheduling.
+        unsafe {
+            let tid = gettid();
+            setpriority(0, tid as u32, 19); // PRIO_PROCESS with a thread id: this thread
+            syscall(ioprio_set, 1i64, tid as i64, 3i64 << 13); // IOPRIO_WHO_PROCESS, IOPRIO_CLASS_IDLE
+        }
+    }
+}
+
 /// Under a root ($HOME itself: files at the top level only), not excluded, and wanted by ss-files.
 fn wanted(d: &Daemon, p: &Path, dir: bool) -> bool {
     let Some(root) = d.roots.iter().find(|r| p.starts_with(r) && p != r.as_path()) else { return false };
@@ -115,6 +150,7 @@ fn next_job<T>(d: &Daemon, ready: impl Fn(&FastQ) -> bool, job: impl FnOnce(&mut
 }
 
 fn fast_loop(d: Arc<Daemon>) {
+    background();
     loop {
         let (rescan, paths) = next_job(&d, |q| q.rescan || !q.paths.is_empty(), |q| (std::mem::take(&mut q.rescan), std::mem::take(&mut q.paths)));
         let t = Instant::now();
@@ -133,6 +169,7 @@ fn fast_loop(d: Arc<Daemon>) {
 /// Sources are read on their own thread (settings takes ~1.3 s on a Pi), each
 /// only when its own files change.
 fn sources_loop(d: Arc<Daemon>) {
+    background();
     loop {
         let kinds = next_job(&d, |q| !q.sources.is_empty(), |q| std::mem::take(&mut q.sources));
         sync_sources(&d, &kinds);
@@ -148,13 +185,19 @@ fn sync_sources(d: &Daemon, kinds: &HashSet<Kind>) {
         let Ok(known) = d.store.stamps(Some(kind)) else { continue };
         // `[[exclude]] kind = "history"` turns a whole source off.
         let off = d.prefs.read().unwrap().exclude.iter().any(|r| r.kind == Some(kind) && r.path.is_none() && r.key.is_none());
+        // None: the source could not be read (a torn copy, a parse error),
+        // which must not look like an empty source and delete its rows.
         let docs = match kind {
-            _ if off => Vec::new(),
-            Kind::App => ext::apps(),
-            Kind::Setting => ext::settings(),
-            Kind::Clip => ext::clips(&d.cfg.state),
-            Kind::History => ext::history(),
-            _ => ext::emoji(),
+            _ if off => Some(Vec::new()),
+            Kind::App => Some(ext::apps()),
+            Kind::Setting => ext::settings_checked(),
+            Kind::Clip => ext::clips_checked(&d.cfg.state),
+            Kind::History => ext::history_checked(),
+            _ => Some(ext::emoji()),
+        };
+        let Some(docs) = docs else {
+            eprintln!("superspace: reading {kind:?} failed; keeping its rows");
+            continue;
         };
         let mut seen = HashSet::new();
         let mut changed = Vec::new();
@@ -244,17 +287,18 @@ fn flush(d: &Daemon, batch: &mut Vec<(Doc, String, i64)>) {
     d.wake_embedder();
 }
 
-/// Forget items by key or key prefix, with the frames and thumbnails of any media among them.
+/// Forget items by key or key prefix, with the frames and thumbnails of any media among them,
+/// and their place in the media queue.
 fn forget(d: &Daemon, keys: &[String], prefixes: &[String]) {
+    let exact: HashSet<&String> = keys.iter().collect();
+    let gone = |k: &String| exact.contains(k) || prefixes.iter().any(|p| k.starts_with(p.as_str()));
     {
-        let exact: HashSet<&String> = keys.iter().collect();
         let mem = d.store.mem.read().unwrap();
-        for it in mem.items.values().filter(|it| matches!(it.kind, Kind::Image | Kind::Video | Kind::Audio)) {
-            if exact.contains(&it.key) || prefixes.iter().any(|p| it.key.starts_with(p.as_str())) {
-                ext::forget(&d.cfg.home.join(&it.key["file:".len()..]), &d.cfg.cache);
-            }
+        for it in mem.items.values().filter(|it| matches!(it.kind, Kind::Image | Kind::Video | Kind::Audio) && gone(&it.key)) {
+            ext::forget(&d.cfg.home.join(&it.key["file:".len()..]), &d.cfg.cache);
         }
     }
+    d.media.lock().unwrap().retain(|p| !gone(&file_key(&d.cfg.home, p)));
     if let Err(e) = d.store.delete(keys, prefixes) {
         eprintln!("superspace: forgetting files: {e:#}");
     }
@@ -282,7 +326,7 @@ fn unescape(uri: &str) -> String {
 fn rescan(d: &Daemon) {
     *d.store.used.write().unwrap() = used(d);
     let Ok(known) = d.store.stamps(None) else { return };
-    let files = ext::crawl(&d.cfg.home);
+    let files: Vec<PathBuf> = ext::crawl(&d.cfg.home).into_iter().filter(|p| !excluded(d, p)).collect();
     index_all(d, &files, &known);
     let seen: HashSet<String> = files.iter().map(|p| file_key(&d.cfg.home, p)).collect();
     let gone: Vec<String> = known.into_keys().filter(|k| !seen.contains(k)).collect();
@@ -369,6 +413,7 @@ pub fn next_media(d: &Daemon) -> Option<(PathBuf, i64)> {
 /// the same time: on a Pi they slow each other down 2-8x. A file stays queued
 /// while it is read (progress counts it), and is read again if it changed meanwhile.
 fn media_loop(d: Arc<Daemon>) {
+    background();
     loop {
         drop(d.media_cv.wait_while(d.media.lock().unwrap(), |q| q.is_empty()).unwrap());
         while d.busy.load(Ordering::SeqCst) > 0 || d.store.queue().0 > 0 {
@@ -382,7 +427,8 @@ fn media_loop(d: Arc<Daemon>) {
                 let _heavy = d.heavy.lock().unwrap();
                 ext::media_doc(&p, &d.cfg.home, &d.cfg.cache)
             };
-            if let Some(doc) = doc {
+            // Not if the file changed or went while it was read (forget() may be done with it already).
+            if let Some(doc) = doc.filter(|_| ext::media_stamp(&p, &d.cfg.home) == stamp) {
                 let (stamp, mtime) = (doc.stamp.clone(), file_stamp(&p).map_or(0, |s| s.1));
                 if let Err(e) = d.store.put(vec![(Doc { key, icon: media_icon(&p, &doc.icon), ..doc }, stamp, mtime)]) {
                     eprintln!("superspace: indexing {}: {e:#}", p.display());
@@ -400,6 +446,7 @@ fn media_loop(d: Arc<Daemon>) {
 /// at a time. A refused batch is retried part by part; refused parts are
 /// remembered (not retried until they change); a down server is waited for.
 fn embed_loop(d: Arc<Daemon>) {
+    background();
     let url = d.cfg.index_url.clone();
     let mut down = false;
     let wait = |secs| {
@@ -519,26 +566,19 @@ fn source_kind(p: &Path) -> Kind {
     }
 }
 
+/// Changes worth a sync: under a root (`roots` deepest first), nothing hidden on the way, and in
+/// $HOME itself only its own files (not the daemon's database, not Chromium's profile).
+pub fn watched(home: &Path, roots: &[PathBuf], p: &Path) -> bool {
+    let hidden = p.strip_prefix(home).unwrap_or(p).components().any(|c| c.as_os_str().to_string_lossy().starts_with('.'));
+    !hidden && roots.iter().find(|r| p.starts_with(r)).is_some_and(|r| r != home || p.parent() == Some(home))
+}
+
 /// Watches the sources' files (through their folders: they may not exist yet)
 /// and the preferences; the roots' folders are watched by `rescan`. Changes
 /// are handed over once quiet for SETTLE (at most 1 s late); history and
 /// clipboard changes at most every SLOW_SOURCES.
-fn watch(d: Arc<Daemon>, rx: Receiver<notify::Result<notify::Event>>) {
+fn watch(d: Arc<Daemon>, rx: Receiver<notify::Result<notify::Event>>, sources: Vec<PathBuf>) {
     let prefs_file = d.cfg.prefs();
-    let _ = std::fs::create_dir_all(&d.cfg.config);
-    let mut sources = ext::watch_paths();
-    sources.push(d.cfg.state.join("clip-sources.json"));
-    {
-        let mut w = d.watcher.lock().unwrap();
-        let Some(w) = w.as_mut() else { return };
-        let mut dirs = HashSet::new();
-        for p in sources.iter().chain([&prefs_file]) {
-            let dir = if p.is_dir() { p.clone() } else { p.parent().map(Path::to_path_buf).unwrap_or_default() };
-            if dir.is_dir() && dirs.insert(dir.clone()) {
-                let _ = w.watch(&dir, notify::RecursiveMode::NonRecursive);
-            }
-        }
-    }
     let mut job = FastQ::default();
     let (mut prefs, mut first, mut last) = (false, None::<Instant>, Instant::now());
     let (mut slow, mut slow_at) = (HashSet::new(), None::<Instant>);
@@ -562,7 +602,7 @@ fn watch(d: Arc<Daemon>, rx: Receiver<notify::Result<notify::Event>>) {
                             }
                             k => _ = job.sources.insert(k),
                         }
-                    } else if d.roots.iter().any(|r| p.starts_with(r)) {
+                    } else if watched(&d.cfg.home, &d.roots, &p) {
                         job.paths.insert(p);
                     } else {
                         continue;

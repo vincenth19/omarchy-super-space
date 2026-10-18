@@ -59,9 +59,12 @@ pub mod ext {
     pub fn quick_doc(p: &Path, home: &Path, _cache: &Path) -> Option<Doc> {
         media(p, home, format!("quick-{}", media_stamp(p, home)?), Vec::new())
     }
-    /// A photo's picture is copied to <cache>/<name>/f0001.jpg, as ss-media names frames.
+    /// A photo's picture is copied to <cache>/<name>/f0001.jpg, as ss-media names frames. Like
+    /// ss-media the stamp is read first, and a file that goes meanwhile still gives a Doc; a
+    /// "slow" one takes 1.5 s.
     pub fn media_doc(p: &Path, home: &Path, cache: &Path) -> Option<Doc> {
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        let stamp = media_stamp(p, home)?;
+        std::thread::sleep(std::time::Duration::from_millis(if p.to_string_lossy().contains("slow") { 1500 } else { 200 }));
         let part = if p.extension()? == "jpg" {
             let img = cache.join(p.file_name()?).join("f0001.jpg");
             std::fs::create_dir_all(img.parent()?).ok()?;
@@ -71,7 +74,7 @@ pub mod ext {
             let text = std::fs::read_to_string(p.with_extension("lrc")).unwrap_or_default();
             Part { embed: Embed::Text(doc_text("song", &text)), text, locator: Locator { t: Some(1.0), ..Locator::default() } }
         };
-        media(p, home, media_stamp(p, home)?, vec![part])
+        media(p, home, stamp, vec![part])
     }
     pub fn forget(p: &Path, _cache: &Path) {
         FORGOT.lock().unwrap().push(p.to_path_buf());
@@ -102,6 +105,15 @@ pub mod ext {
     }
     pub fn apps() -> Vec<Doc> {
         Vec::new()
+    }
+    pub fn settings_checked() -> Option<Vec<Doc>> {
+        Some(settings())
+    }
+    pub fn history_checked() -> Option<Vec<Doc>> {
+        Some(history())
+    }
+    pub fn clips_checked(state: &Path) -> Option<Vec<Doc>> {
+        Some(clips(state))
     }
     pub fn settings() -> Vec<Doc> {
         Vec::new()
@@ -408,7 +420,7 @@ fn picks_are_learned_per_prefix() {
     let id = picked.trim_start_matches("app:");
     assert_eq!(v["argv"], json!(["gtk-launch", id]));
     assert!(RAN.lock().unwrap().iter().any(|a| a == &["gtk-launch", id]));
-    assert_eq!(t.keys("te")[0], picked, "the pick wins its prefix");
+    until("the pick wins its prefix", Duration::from_secs(2), || t.keys("te")[0] == picked);
     assert_eq!(t.keys("t")[0], picked, "and shorter prefixes");
     let (rows, _) = t.search("");
     assert_eq!((rows[0].key.as_str(), rows[0].why), (picked.as_str(), Why::Recent), "empty query lists recent picks");
@@ -546,6 +558,8 @@ fn snippet_marks_query_words_at_word_starts() {
     assert_eq!(marked, ["golden", "retr"]);
     assert!(s.text.starts_with("word") && s.text.chars().count() <= 160);
     assert!(search::snippet("übergolden", &["golden".into()]).marks.is_empty());
+    let s = search::snippet(&format!("golden {long}"), &["golden".into(), "retr".into()]);
+    assert!(s.text.ends_with("the golden retriever ran") && s.marks.len() == 2, "where both words are, not the first word: {}", s.text);
 }
 
 #[test]
@@ -825,4 +839,193 @@ fn at_most_three_emoji_unless_they_are_all_or_asked_for() {
     assert_eq!(emoji("dog"), 3);
     assert_eq!(emoji("woof"), 5, "emoji are the only matches");
     assert_eq!(emoji("emoji dog"), 5, "the query asks for emoji");
+}
+
+#[test]
+fn every_matching_kind_shows_in_the_first_five_and_videos_keep_every_moment() {
+    let t = start(0, "");
+    // Like the Pi's "golden retriever": six dog photos, the weekend video's dog moments match less well.
+    let media = |key: &str, kind: Kind, frames: &[(&str, Locator)]| {
+        let parts = frames.iter().enumerate().map(|(i, (words, locator))| {
+            let img = t.dir.join(format!("cache/{key}/f{:04}.jpg", i + 1));
+            std::fs::create_dir_all(img.parent().unwrap()).unwrap();
+            std::fs::write(&img, words).unwrap();
+            Part { text: String::new(), locator: locator.clone(), embed: Embed::Image(img) }
+        });
+        Doc { parts: parts.collect(), ..doc(key, kind, &key[5..], "", &[]) }
+    };
+    let at = |a: f32, b: f32| Locator { t: Some(a), t_end: Some(b), ..Locator::default() };
+    let (dog, beach, street) = ("golden retriever swimming lake water splash paddle", "waves breaking on beach", "city street traffic");
+    let mut docs: Vec<Doc> = ["park", "stick", "ball", "grass", "sofa", "snow"]
+        .iter().map(|w| media(&format!("file:IMG_{w}.jpg"), Kind::Image, &[(&format!("golden retriever {w}"), Locator::default())])).collect();
+    docs.push(media("file:cat.jpg", Kind::Image, &[("cat on a sofa", Locator::default())]));
+    docs.push(media("file:traffic.mp4", Kind::Video, &[(street, at(0.0, 8.0))]));
+    docs.push(media("file:weekend.mp4", Kind::Video, &[(beach, at(0.0, 8.0)), (beach, at(8.0, 10.0)), (dog, at(10.0, 18.0)), (dog, at(18.0, 26.0)),
+        (dog, at(26.0, 30.0)), (street, at(30.0, 38.0)), (street, at(38.0, 45.0)), (dog, at(45.0, 53.0)), (dog, at(53.0, 59.0))]));
+    t.put(docs);
+    let (rows, _) = t.search("golden retriever");
+    use Kind::{Emoji as E, Image as I, Video as V};
+    assert_eq!(rows.iter().map(|r| r.kind).collect::<Vec<_>>(), [I, I, I, I, V, I, I, Kind::Web], "four photos, the video, the rest; nothing below its cutoff");
+    assert!(rows.iter().all(|r| r.kind != I || r.score > rows[4].score), "by score alone the video would come 7th");
+    let mut moments: Vec<_> = rows[4].hits.iter().map(|h| (h.locator.t, h.locator.t_end)).collect();
+    moments.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    assert_eq!(moments, [(Some(10.0), Some(30.0)), (Some(45.0), Some(59.0))], "every frame above the cutoff, neighbours merged");
+    let (rows, _) = t.search("puppy");
+    assert!(rows.len() == 7 && rows[..6].iter().all(|r| r.kind == I) && rows.windows(2).all(|w| w[0].score >= w[1].score), "one kind: by score");
+    t.put((0..5).map(|i| doc(&format!("emoji:{i}"), Kind::Emoji, &format!("Golden retriever {i}"), "", &[])).collect());
+    let kinds: Vec<Kind> = t.search("golden retriever").0.iter().map(|r| r.kind).collect();
+    assert_eq!(kinds, [E, E, E, I, I, I, I, V, I, I, Kind::Web], "only the emoji shown count");
+}
+
+#[test]
+fn at_most_two_history_rows_unless_asked_for() {
+    let t = start(0, "");
+    let mut docs: Vec<Doc> = (0..5).map(|i| doc(&format!("history:{i}"), Kind::History, &format!("Dog news {i}"), "https://dog.com/news dog", &[])).collect();
+    docs.push(doc("file:Documents/dog.txt", Kind::File, "dog.txt", "dog.com walking the dog", &[]));
+    t.put(docs);
+    let history = |q: &str, kinds: Option<&[Kind]>| search::search(&t.d, q, 30, t.d.query_vec(q).as_ref(), kinds).0.iter().filter(|r| r.kind == Kind::History).count();
+    assert_eq!(history("dog", None), 2);
+    assert_eq!(history("dog.com", None), 5, "a web address asks for history");
+    assert_eq!(history("dog", Some(&[Kind::File, Kind::History])), 5, "so do kinds");
+}
+
+#[test]
+fn a_title_word_with_one_typo_is_a_name_match() {
+    let t = start(0, "");
+    corpus(&t);
+    t.put(vec![
+        doc("app:chromium", Kind::App, "Chromium", "Browse the web", &[]),
+        doc("file:Documents/chrome-notes.txt", Kind::File, "chrome-notes.txt", "tabs", &[]),
+    ]);
+    // Names only (no query vector), so only the typo rule can match.
+    let names = |q: &str| search::search(&t.d, q, 30, None, None);
+    for q in ["chromum", "chormium", "chromiun", "Chromiumm"] {
+        let (rows, _) = names(q);
+        assert_eq!((rows[0].key.as_str(), rows[0].why, rows.len()), ("app:chromium", Why::Name, 2), "{q}");
+    }
+    assert_eq!(t.keys("chromum")[0], "app:chromium", "first with meaning too");
+    assert_eq!(names("termnal").0[0].key, "app:terminal");
+    for q in ["chrmiun", "chromum tabs", "quantum chromodynamics lecture notes", "lease.pdq"] {
+        assert!(names(q).1, "{q}: two edits, a word not in the title, or a word under 5 letters with a typo");
+    }
+}
+
+#[test]
+fn under_an_answer_card_near_misses_by_meaning_go() {
+    let t = start(0, "");
+    t.put(vec![
+        doc("file:Documents/flight.txt", Kind::File, "flight.txt", "sydney", &[]),
+        doc("file:Documents/trip.txt", Kind::File, "trip.txt", "sydney jakarta", &[]),
+    ]);
+    // flight.txt is 0.408 from the query: above the file cutoff, by less than 0.03.
+    std::fs::write(t.d.cfg.prefs(), FAKE_CUTOFFS.replace("file = 0.3", "file = 0.39")).unwrap();
+    t.d.reload_prefs();
+    let q = "3pm sydney in jakarta";
+    assert!(ss_answers::answer(q, None, crate::store::now(), &t.d.tz).is_some());
+    assert_eq!(t.keys(q), ["file:Documents/trip.txt", &format!("web:{q}")]);
+    let e = t.req(json!({"op": "explain", "id": 1, "q": q, "key": "file:Documents/flight.txt"}));
+    assert_eq!((e["kept"].as_bool(), e["rank"].is_null()), (Some(true), true), "a match, not shown under the answer");
+}
+
+/// A daemon with no threads, its servers down, in a fresh folder.
+fn bare() -> Arc<Daemon> {
+    let dir = std::env::temp_dir().join(format!("ss{}-bare-{:?}", std::process::id(), std::thread::current().id()));
+    let down = "http://127.0.0.1:9/v1/embeddings".to_string();
+    let cfg = Cfg { home: dir.join("home"), state: dir.join("state"), cache: dir.join("cache"), config: dir.join("config"),
+        sock: dir.join("s.sock"), query_url: down.clone(), index_url: down };
+    let _ = std::fs::remove_dir_all(&dir);
+    Daemon::open(cfg).unwrap()
+}
+
+#[test]
+fn a_query_server_that_is_down_never_says_nothing_matches() {
+    let d = bare();
+    d.store.put(vec![(doc("file:Documents/puppy.txt", Kind::File, "puppy.txt", "my puppy plays fetch", &[]), "1".into(), 0)]).unwrap();
+    let final_phase = |q: &str| match d.search_response(&server::Search { id: 1, q: q.into(), limit: 30, kinds: None, t0: Instant::now() }, Phase::Final, 0.0) {
+        Response::Search { rows, empty, .. } => (rows.len(), empty),
+        _ => unreachable!(),
+    };
+    assert_eq!(final_phase("retriever"), (1, false), "only the web row, but no claim that nothing matches");
+    assert_eq!(final_phase("zx"), (1, true), "two letters never ask for meaning");
+}
+
+#[test]
+fn media_deleted_while_it_is_read_leaves_no_row() {
+    let t = start(0, "");
+    std::thread::sleep(Duration::from_millis(500));
+    let song = t.dir.join("home/Documents/slow.mp3");
+    std::fs::write(song.with_extension("lrc"), "words of a slow song").unwrap();
+    std::fs::write(&song, "audio").unwrap();
+    until("being read", Duration::from_secs(3), || t.d.heavy.try_lock().is_err());
+    std::fs::remove_file(&song).unwrap();
+    until("forgotten", Duration::from_secs(3), || ext::FORGOT.lock().unwrap().contains(&song));
+    until("read to the end", Duration::from_secs(3), || t.d.heavy.try_lock().is_ok());
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(t.d.store.stamp("file:Documents/slow.mp3"), None, "no ghost row");
+    assert!(t.d.media.lock().unwrap().is_empty());
+}
+
+#[test]
+fn excluded_files_are_forgotten_and_never_read() {
+    let t = start_with(0, "", None, |home| {
+        std::fs::create_dir_all(home.join("Documents/private")).unwrap();
+        std::fs::write(home.join("Documents/private/pins.txt"), "vault code 1234").unwrap();
+        std::fs::write(home.join("Documents/open.txt"), "vault notes").unwrap();
+    });
+    let (private, open) = ("file:Documents/private/pins.txt", "file:Documents/open.txt");
+    assert!(t.d.store.stamp(private).is_some());
+    t.req(json!({"op": "pref", "id": 1, "change": {"exclude": {"path": "~/Documents/private"}}}));
+    until("excluded folder forgotten", Duration::from_secs(3), || t.d.store.stamp(private).is_none());
+    t.req(json!({"op": "pref", "id": 1, "change": {"exclude": {"key": open}}}));
+    for op in [json!({"op": "read", "id": 1, "key": open}), json!({"op": "explain", "id": 1, "q": "vault", "key": open}), json!({"op": "similar", "id": 1, "key": open})] {
+        match t.d.handle(serde_json::from_value(op).unwrap()) {
+            Response::Error { error, .. } => assert_eq!(error, format!("{open} is not indexed")),
+            other => panic!("{}", serde_json::to_string(&other).unwrap()),
+        }
+    }
+}
+
+#[test]
+fn enter_runs_the_action_before_learning_from_it() {
+    let t = start(300, "");
+    corpus(&t);
+    let t0 = Instant::now();
+    let v = t.req(json!({"op": "activate", "id": 1, "key": "app:firefox", "q": "web browsing"}));
+    assert!(t0.elapsed() < Duration::from_millis(250), "waited {:?} for the query server", t0.elapsed());
+    assert_eq!(v["argv"], json!(["gtk-launch", "firefox"]));
+    until("pick learned", Duration::from_secs(3), || t.d.picks.read().unwrap().iter().any(|p| p.key == "app:firefox" && p.q == "web browsing"));
+}
+
+#[test]
+fn the_watcher_skips_hidden_paths_and_folders_in_home() {
+    let home = std::path::Path::new("/h");
+    let roots = [home.join("Documents"), home.to_path_buf()];
+    let w = |p: &str| ingest::watched(home, &roots, &home.join(p));
+    assert!(w("Documents/a/b.txt") && w("notes.txt") && w("Documents"));
+    for p in [".local/state/superspace/index.sqlite-wal", ".config/chromium/Default/Cookies", "Documents/.git/index", "Other/x.txt"] {
+        assert!(!w(p), "{p}");
+    }
+}
+
+#[test]
+fn a_second_daemon_refuses_before_opening_the_index() {
+    let d = bare();
+    let cfg = Cfg { state: d.cfg.state.with_file_name("state2"), ..d.cfg.clone() };
+    let held = server::lock(&cfg.state).unwrap();
+    let e = server::serve(cfg.clone()).unwrap_err();
+    assert!(format!("{e:#}").contains("already serving"), "{e:#}");
+    assert!(!cfg.state.join("index.sqlite").exists(), "the index is not touched");
+    drop(held);
+    // A child another test is starting may hold a copy of the lock until it execs.
+    until("lock released", Duration::from_secs(1), || server::lock(&cfg.state).is_ok());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn indexing_threads_run_at_nice_19_and_searches_do_not() {
+    let _t = start(0, "");
+    let nice = |stat: &std::path::Path| std::fs::read_to_string(stat).unwrap().rsplit(')').next().unwrap().split_whitespace().nth(16).unwrap().parse::<i32>().unwrap();
+    let low = std::fs::read_dir("/proc/self/task").unwrap().flatten().filter(|e| nice(&e.path().join("stat")) == 19).count();
+    assert!(low >= 4, "{low} threads at nice 19");
+    assert_eq!(nice(std::path::Path::new("/proc/thread-self/stat")), 0, "only the indexing threads");
 }
