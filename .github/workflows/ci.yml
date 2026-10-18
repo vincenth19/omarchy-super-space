@@ -1,0 +1,16 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      # The media and file tests run the same tools as the Pi.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg poppler-utils
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --locked
+      - run: shellcheck bin/superspace-setup

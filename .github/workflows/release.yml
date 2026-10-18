@@ -1,0 +1,42 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, asset: superspace-linux-arm64 }
+          - { os: ubuntu-24.04, target: x86_64-unknown-linux-gnu, asset: superspace-linux-x64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release --locked -p superspace --target ${{ matrix.target }}
+      - run: |
+          mkdir dist
+          cp target/${{ matrix.target }}/release/superspace dist/${{ matrix.asset }}
+          strip dist/${{ matrix.asset }}
+          cd dist && sha256sum ${{ matrix.asset }} > ${{ matrix.asset }}.sha256
+          ls -l
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/
+
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}

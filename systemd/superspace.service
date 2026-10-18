@@ -1,0 +1,18 @@
+[Unit]
+Description=Super Space: meaning-aware search over apps, files, photos, video and clipboard
+After=graphical-session.target superspace-embed.service superspace-embed-index.service
+Wants=superspace-embed.service superspace-embed-index.service
+# Actions open apps and paste into windows, so the daemon needs the Wayland
+# session uwsm imports before graphical-session.target, and goes with it.
+# Without one (an SSH login) it stays down and starts at the next desktop login.
+PartOf=graphical-session.target
+ConditionEnvironment=WAYLAND_DISPLAY
+
+[Service]
+# Normal priority, so a search answers at once. The daemon lowers the
+# priority of its own indexing threads (nice 19, idle I/O) itself.
+ExecStart=%h/.local/share/superspace/bin/superspace serve
+Restart=on-failure
+
+[Install]
+WantedBy=graphical-session.target

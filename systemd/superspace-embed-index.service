@@ -1,0 +1,12 @@
+[Unit]
+Description=Super Space: EmbeddingGemma 2 for indexing documents, photos and frames (localhost only)
+
+[Service]
+# Embeds documents and images for the index, using only processor and disk
+# time nothing else wants. It maps the same model file as superspace-embed, so
+# the weights are shared in memory; --mmproj adds the image encoder.
+ExecStart=%h/.local/share/superspace/llama/llama-server -m %h/.local/share/superspace/models/embeddinggemma-2-Q8_0.gguf --mmproj %h/.local/share/superspace/models/mmproj-embeddinggemma-2-Q8_0.gguf --host 127.0.0.1 --port 47802 --embeddings -t 3 -c 4096 -b 4096 -ub 4096 -np 1 -lv 1
+Nice=19
+CPUWeight=idle
+IOSchedulingClass=idle
+Restart=on-failure

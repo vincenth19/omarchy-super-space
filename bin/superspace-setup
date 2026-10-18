@@ -1,0 +1,273 @@
+#!/bin/bash
+# Super Space setup: fetches the daemon, llama.cpp and EmbeddingGemma 2 (about
+# 900 MB, once), starts the services, gives your coding agents the skill and
+# MCP server, and offers to bind Super+Space. Run it again any time: finished
+# steps are skipped, and an updated plugin gets its new daemon.
+#
+#   superspace-setup [--yes] [--progress] [--binary PATH]   install or update
+#   superspace-setup bind | unbind     Super+Space opens Super Space, or not
+#   superspace-setup status            what is installed and running
+#   superspace-setup uninstall         undo everything (keeps preferences)
+#
+#   --yes          bind Super+Space without asking
+#   --progress     JSON lines on stdout instead of text, for the search box
+#   --binary PATH  use a local build of superspace instead of the release
+
+set -euo pipefail
+shopt -s nullglob
+
+PLUGIN_ID=io.github.vincenth19.superspace
+REPO=vincenth19/omarchy-super-space
+PLUGIN=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)
+SHARE=$HOME/.local/share/superspace
+BIN=$SHARE/bin/superspace
+SS=$HOME/.local/bin/superspace
+UNITS=(superspace.service superspace-embed.service superspace-embed-index.service)
+BINDINGS=$HOME/.config/hypr/bindings.lua
+MARK_BEGIN='-- >>> superspace-setup: Super+Space opens Super Space (undo: superspace-setup unbind)'
+MARK_END='-- <<< superspace-setup'
+LLAMA_BUILD=b11718
+# Pinned to a revision so the checksums below always match.
+HF=https://huggingface.co/ggml-org/embeddinggemma-2-GGUF/resolve/bfcd298762cc34d0357ece5ebdd31791a3a374d8
+MODEL=embeddinggemma-2-Q8_0.gguf
+MMPROJ=mmproj-embeddinggemma-2-Q8_0.gguf
+
+# say STEP MESSAGE: {"step": …, "message": …} with --progress, else the message.
+say() {
+  if ((PROGRESS)); then jq -cn --arg s "$1" --arg m "$2" '{step: $s, message: $m}'; else echo "$2"; fi
+}
+
+die() {
+  if ((PROGRESS)); then say error "$*"; else echo "superspace-setup: $*" >&2; fi
+  exit 1
+}
+
+skill_dirs() { printf '%s\n' ~/.agents/skills ~/.claude/skills ~/.codex/skills ~/.pi/agent/skills ~/.hermes/skills ~/.hermes/profiles/*/skills; }
+
+unlink_ours() { local p; for p; do if [[ -L $p ]]; then rm "$p"; fi; done; }
+
+sum_ok() { [[ -f $1 ]] && echo "$2  $1" | sha256sum -c --status; }
+
+bound() { [[ -f $BINDINGS ]] && grep -qxF -- "$MARK_END" "$BINDINGS"; }
+
+# report NAME DONE TOTAL: how far a download is. TOTAL is 0 when unknown.
+report() {
+  if ((PROGRESS)); then
+    printf '{"step":"download","file":"%s","done":%s,"total":%s}\n' "$1" "$2" "$3"
+  elif (($3)); then
+    printf '\r  %s%% of %s MB ' "$(($2 * 100 / $3))" "$(($3 >> 20))" >&2
+  fi
+}
+
+# watch_size NAME FILE TOTAL: report once a second until killed or setup exits.
+watch_size() {
+  while kill -0 "$$" 2>/dev/null; do
+    report "$1" "$(stat -c %s "$2" 2>/dev/null || echo 0)" "$3"
+    sleep 1
+  done
+}
+
+# fetch URL SHA256 SIZE DEST: resumable, checked, and only moved into place whole.
+fetch() {
+  local name=${1##*/} poll rc=0
+  [[ -f $4 ]] && return
+  mkdir -p "$(dirname "$4")"
+  say download "Downloading $name"
+  if ! sum_ok "$4.part" "$2"; then
+    watch_size "$name" "$4.part" "$3" &
+    poll=$!
+    curl -fsSL --retry 3 -C - -o "$4.part" "$1" || rc=$?
+    kill "$poll" 2>/dev/null || true
+    ((rc)) || report "$name" "$(stat -c %s "$4.part")" "$3"
+    ((PROGRESS)) || echo >&2
+    ((rc == 0)) || die "download of $name stopped; run setup again to resume (or delete $4.part)"
+  fi
+  sum_ok "$4.part" "$2" || { rm -f "$4.part"; die "$name failed its checksum; run setup again"; }
+  mv "$4.part" "$4"
+}
+
+install_binary() {
+  if [[ -n $DEV_BINARY ]]; then
+    install -Dm755 "$DEV_BINARY" "$BIN"
+    return
+  fi
+  local version url sum
+  version=$(jq -r .version "$PLUGIN/manifest.json") || die "cannot read the version from $PLUGIN/manifest.json"
+  url=https://github.com/$REPO/releases/download/v$version/superspace-linux-$ARCH
+  sum=$(curl -fsSL "$url.sha256" | cut -d' ' -f1) ||
+    die "no superspace v$version release for $ARCH yet (for a local build: --binary PATH)"
+  sum_ok "$BIN" "$sum" && return
+  rm -f "$BIN"
+  fetch "$url" "$sum" 0 "$BIN"
+  chmod 755 "$BIN"
+}
+
+install_llama() {
+  [[ $(cat "$SHARE/llama/.build" 2>/dev/null) == "$LLAMA_BUILD" ]] && return
+  local tgz=llama-$LLAMA_BUILD-bin-ubuntu-$ARCH.tar.gz
+  fetch "https://github.com/ggml-org/llama.cpp/releases/download/$LLAMA_BUILD/$tgz" "$LLAMA_SUM" "$LLAMA_SIZE" "$SHARE/$tgz"
+  rm -rf "$SHARE/llama"
+  mkdir -p "$SHARE/llama"
+  tar -xzf "$SHARE/$tgz" -C "$SHARE/llama" --strip-components=1
+  echo "$LLAMA_BUILD" >"$SHARE/llama/.build"
+  rm "$SHARE/$tgz"
+}
+
+# Speech-to-text engine for spoken words and lyrics. The media owner supplies
+# the pinned URLs and checksums; until then nothing is downloaded.
+install_stt() { :; }
+
+# Installed for real, not just Omarchy's install-on-first-run stub (running a
+# stub would install the agent).
+real() {
+  local p
+  p=$(command -v "$1") || return 1
+  ! grep -q 'mise use -g' "$p" 2>/dev/null || mise which "$1" >/dev/null 2>&1
+}
+
+t() { timeout 60 "$@" </dev/null >/dev/null 2>&1; }
+
+# Each takes add|remove. Removing first makes a second add a no-op.
+claude_mcp() { t claude mcp remove --scope user superspace; [[ $1 == remove ]] || t claude mcp add --scope user superspace -- "$SS" mcp; }
+codex_mcp() { t codex mcp remove superspace; [[ $1 == remove ]] || t codex mcp add superspace -- "$SS" mcp; }
+gemini_mcp() { t gemini mcp remove -s user superspace; [[ $1 == remove ]] || t gemini mcp add -s user superspace "$SS" mcp; }
+copilot_mcp() { t copilot mcp remove superspace; [[ $1 == remove ]] || t copilot mcp add superspace -- "$SS" mcp; }
+opencode_mcp() {
+  local f=$HOME/.config/opencode/opencode.json
+  [[ -f $f || $1 == remove ]] || { mkdir -p "${f%/*}" && echo '{}' >"$f"; }
+  [[ -f $f ]] || return 0
+  cp -p "$f" "$f.bak-superspace"
+  # jq refuses a file it cannot parse (JSONC comments), which leaves it as it was.
+  if ! jq --arg mode "$1" --arg ss "$SS" \
+    'if $mode == "add" then .mcp.superspace = {type: "local", command: [$ss, "mcp"], enabled: true} else del(.mcp.superspace) end' \
+    "$f" >"$f.tmp"; then
+    rm -f "$f.tmp"
+    return 1
+  fi
+  mv "$f.tmp" "$f"
+}
+
+agents() {
+  local a d got=()
+  for a in claude codex gemini copilot opencode; do
+    if real "$a" && "${a}_mcp" "$1"; then got+=("$a"); fi
+  done
+  while read -r d; do
+    if [[ $1 == remove ]]; then
+      unlink_ours "$d/superspace"
+    elif [[ ! -e $d/superspace || -L $d/superspace ]]; then
+      mkdir -p "$d" && ln -sfn "$PLUGIN/skills/superspace" "$d/superspace"
+    fi
+  done < <(skill_dirs)
+  [[ $1 == remove ]] || say agents "Agent skill linked; MCP server registered with: ${got[*]:-no agent found}"
+}
+
+bind_key() {
+  [[ -f $BINDINGS ]] || { say bind "No $BINDINGS; bind Super+Space to: omarchy-shell shell toggle $PLUGIN_ID"; return 0; }
+  bound && return 0
+  if ((!YES)) && ! { [[ -t 0 ]] && gum confirm "Make Super+Space open Super Space? (unbind puts your current binding back)"; }; then
+    say ask-bind "Super+Space left as it is. To make it open Super Space: superspace-setup bind"
+    return 0
+  fi
+  cp -p "$BINDINGS" "$BINDINGS.bak-superspace"
+  cat >>"$BINDINGS" <<EOF
+
+$MARK_BEGIN
+hl.unbind("SUPER + SPACE")
+o.bind("SUPER + SPACE", "Super Space", "omarchy-shell shell toggle $PLUGIN_ID \"{}\"")
+$MARK_END
+EOF
+  hyprctl reload >/dev/null 2>&1 || true
+  say bind "Super+Space now opens Super Space"
+}
+
+unbind_key() {
+  bound || return 0
+  cp -p "$BINDINGS" "$BINDINGS.bak-superspace"
+  # Drop the block, then the blank line it was appended after.
+  sed -i "/^-- >>> superspace-setup/,/^$MARK_END\$/d" "$BINDINGS"
+  sed -i '${/^$/d}' "$BINDINGS"
+  hyprctl reload >/dev/null 2>&1 || true
+  say bind "Super+Space is back to your previous binding"
+}
+
+install_all() {
+  ((EUID)) || die "run this as your own user, not root"
+  local c u
+  for c in curl sha256sum tar jq systemctl; do command -v "$c" >/dev/null || die "needs $c"; done
+  case $(uname -m) in
+  aarch64) ARCH=arm64 LLAMA_SIZE=14020840 LLAMA_SUM=29cfa0befe843259ac4ee276860e7fb62839d737dc0e5e46b3ae53f8ba5d9783 ;;
+  x86_64) ARCH=x64 LLAMA_SIZE=17968484 LLAMA_SUM=99f83b15cea9a4fb8945516c276b5f42b11608f82104fc6fa98a541cac826de7 ;;
+  *) die "Super Space runs on aarch64 and x86_64, not $(uname -m)" ;;
+  esac
+
+  install_binary
+  install_llama
+  fetch "$HF/$MODEL" 2188ac1deca4b77dffefd603c2776a9d76d9d74ec01841392982ebb840b09135 309855456 "$SHARE/models/$MODEL"
+  fetch "$HF/$MMPROJ" c4a8a52691ecef40618438928bdf9e68379b854e24166f292592353db0aab64f 554821024 "$SHARE/models/$MMPROJ"
+  install_stt
+  mkdir -p ~/.local/bin
+  ln -sfn "$BIN" "$SS"
+  ln -sfn "$PLUGIN/bin/superspace-setup" ~/.local/bin/superspace-setup
+
+  say services "Starting services"
+  for u in "${UNITS[@]}"; do systemctl --user -q link --force "$PLUGIN/systemd/$u"; done
+  systemctl --user daemon-reload
+  systemctl --user -q enable superspace.service
+  systemctl --user restart "${UNITS[@]}"
+
+  agents add
+  bind_key
+  say ready "Super Space is running. It indexes in the background, at idle priority."
+}
+
+uninstall() {
+  systemctl --user disable --now "${UNITS[@]}" 2>/dev/null || true
+  unlink_ours "${UNITS[@]/#/$HOME/.config/systemd/user/}"
+  systemctl --user daemon-reload 2>/dev/null || true
+  agents remove
+  unbind_key
+  unlink_ours "$SS" ~/.local/bin/superspace-setup
+  rm -rf "$SHARE" ~/.local/state/superspace ~/.cache/superspace
+  say removed "Super Space removed; your preferences stay in ~/.config/superspace. Remove the plugin with: omarchy plugin remove $PLUGIN_ID"
+}
+
+status() {
+  local bad=0 u d
+  row() {
+    local label=$1
+    shift
+    if "$@" >/dev/null 2>&1; then echo "  ok  $label"; else echo "  --  $label"; bad=1; fi
+  }
+  row "daemon $BIN" test -x "$BIN"
+  row "llama.cpp $LLAMA_BUILD" grep -qx "$LLAMA_BUILD" "$SHARE/llama/.build"
+  row "model $MODEL" test -f "$SHARE/models/$MODEL"
+  row "model $MMPROJ" test -f "$SHARE/models/$MMPROJ"
+  row "command $SS" test -x "$SS"
+  for u in "${UNITS[@]}"; do row "$u running" systemctl --user is-active --quiet "$u"; done
+  row "socket" test -S "${XDG_RUNTIME_DIR:-/run/user/$UID}/superspace.sock"
+  row "Super+Space bound" bound
+  while read -r d; do row "skill in $d" test -L "$d/superspace"; done < <(skill_dirs)
+  return "$bad"
+}
+
+MODE=install_all YES=0 PROGRESS=0 DEV_BINARY=
+while (($#)); do
+  case $1 in
+  status | uninstall) MODE=$1 ;;
+  bind) MODE=bind_key YES=1 ;;
+  unbind) MODE=unbind_key ;;
+  --yes | -y) YES=1 ;;
+  --progress) PROGRESS=1 ;;
+  --binary)
+    DEV_BINARY=$(readlink -f "${2:?--binary needs a path}")
+    [[ -x $DEV_BINARY ]] || die "not an executable: $2"
+    shift
+    ;;
+  -h | --help) sed -n '2,15s/^# \{0,1\}//p' "${BASH_SOURCE[0]}" && exit 0 ;;
+  *) die "unknown argument: $1 (see --help)" ;;
+  esac
+  shift
+done
+
+"$MODE"

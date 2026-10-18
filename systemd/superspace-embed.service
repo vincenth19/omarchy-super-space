@@ -1,0 +1,10 @@
+[Unit]
+Description=Super Space: EmbeddingGemma 2 for search queries (localhost only)
+
+[Service]
+# Embeds what you type. Normal priority and its own process, so a query never
+# waits behind documents being indexed (that is superspace-embed-index).
+# Queries are short: a small context and 2 cores. -lv 1 keeps per-request
+# lines out of the journal.
+ExecStart=%h/.local/share/superspace/llama/llama-server -m %h/.local/share/superspace/models/embeddinggemma-2-Q8_0.gguf --host 127.0.0.1 --port 47801 --embeddings -t 2 -c 512 -b 512 -ub 512 -np 1 -lv 1
+Restart=on-failure
