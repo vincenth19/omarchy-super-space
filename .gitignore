@@ -1,0 +1,4 @@
+target/
+*.gguf
+demo/corpus/
+tests/reports/

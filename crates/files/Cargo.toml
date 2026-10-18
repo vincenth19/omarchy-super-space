@@ -1,0 +1,11 @@
+[package]
+name = "ss-files"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ss-core.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true

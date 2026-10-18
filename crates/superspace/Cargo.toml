@@ -1,0 +1,15 @@
+[package]
+name = "superspace"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ss-core.workspace = true
+ss-files.workspace = true
+ss-media.workspace = true
+ss-sources.workspace = true
+ss-answers.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true

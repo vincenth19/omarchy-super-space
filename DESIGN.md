@@ -1,0 +1,232 @@
+# Super Space: design
+
+Spotlight for Omarchy that understands meaning, fully local. Super+Space opens
+one search box over apps, settings, files (with the text inside PDFs and Office
+files), photos, video moments, spoken words, song lyrics, clipboard, emoji and
+instant answers. One model, EmbeddingGemma 2, embeds text, images and audio
+into the same 768-dim space. Demo target: Raspberry Pi 5 (8 GB, CPU only) on
+Tue 20 Oct 2026; it must also run on x86_64 laptops.
+
+## Budgets (the tests enforce these, measured on the Pi)
+
+| What | Budget |
+|---|---|
+| Instant rows (names, keywords, answers) after a keystroke | under 15 ms at the socket |
+| Final rows (meaning) | under 250 ms p95 |
+| A saved text file becomes searchable / a deleted one disappears | under 2 s |
+| Daemon memory (not counting llama-server) | under 150 MB with 50k parts |
+| Daemon binary | under 15 MB |
+
+## Rules that never bend
+
+1. Local results always rank above the web row. The web row ("Search the web
+   for …") is always last, and is the only row when nothing local is a real match.
+2. When nothing local is a real match, say so: `empty: true`, and the UI shows
+   "Nothing on this computer matches". Meaning search must not pad results with
+   near misses; every kind has its own score cutoff, tuned by the test bench.
+3. Keyword and name matches must work as well as meaning: exact file names,
+   exact phrases and app names always hit.
+4. Everything works from the keyboard.
+5. Nothing leaves the machine except two opt-in fetches: exchange rates
+   (Frankfurter/ECB, twice a day) and the web row when chosen.
+
+## Architecture
+
+```
+SuperSpace.qml  ──one persistent Unix socket──▶  superspace serve (Rust)
+ (Omarchy menu plugin)                           ├─ sources: apps, settings, emoji, clipboard(+source), history
+                                                 ├─ files: crawl, exclude rules, inotify, extract text + locators
+ superspace search/read --json  ─┐               ├─ media: frames, transcripts, lyrics (background queue)
+ superspace mcp (stdio JSON-RPC) ├─ same socket ─├─ answers: maths, units, currency, time zones
+ skills/superspace/SKILL.md     ─┘               ├─ index: sqlite (items, parts, FTS5, picks) + in-memory vectors
+                                                 └─ HTTP ▶ llama-server :47801 (queries, text only, normal priority)
+                                                    HTTP ▶ llama-server :47802 (documents + --mmproj, idle priority)
+```
+
+Crates (one owner each; do not edit another owner's crate):
+
+| Crate / folder | Owns |
+|---|---|
+| `crates/core` (ss-core) | shared types and protocol (lib.rs, frozen; ask before changing) |
+| `crates/superspace` | daemon: store, vector index, ranking, prefs, picks, watcher, queues, socket server, CLI, MCP, action runner |
+| `crates/files` | roots, exclusion rules, crawl, text extraction with locators |
+| `crates/media` | photos, video frames + thumbnails, speech transcripts, lyrics |
+| `crates/sources` | apps, settings, emoji, clipboard + source tracking, browser history |
+| `crates/answers` | instant answers |
+| `ui/` + `SuperSpace.qml` | the search box |
+| `tests/`, `demo/` | test bench, demo corpus, golden queries |
+| `manifest.json`, `bin/`, `systemd/`, `skills/`, `.github/`, `README.md` | packaging |
+
+## Runtime layout
+
+| Path | What |
+|---|---|
+| `~/.config/omarchy/plugins/io.github.vincenth19.superspace/` | the plugin (git clone). Never written at runtime. |
+| `~/.local/share/superspace/bin/superspace` | daemon binary (GitHub release asset per arch) |
+| `~/.local/share/superspace/llama/` | llama.cpp b11718 prebuilt (`llama-b11718-bin-ubuntu-arm64.tar.gz` / `-x64`) |
+| `~/.local/share/superspace/models/` | `embeddinggemma-2-Q8_0.gguf` (310 MB), `mmproj-embeddinggemma-2-Q8_0.gguf` (555 MB) from `ggml-org/embeddinggemma-2-GGUF` |
+| `~/.local/state/superspace/index.sqlite` | the index |
+| `~/.cache/superspace/` | frames, thumbnails, rate cache |
+| `~/.config/superspace/preferences.toml` | preferences (human and agent editable, hot reloaded) |
+| `$XDG_RUNTIME_DIR/superspace.sock` | the socket |
+| `~/.config/systemd/user/superspace{,-embed,-embed-index}.service` | services |
+
+llama-server flags: query server `-t 2 -c 512 -b 512 -ub 512 -np 1 --embeddings
+--port 47801`; index server `--mmproj … -t 3 -c 4096 -b 4096 -ub 4096 -np 1
+--embeddings --port 47802` with `Nice=19 CPUWeight=idle IOSchedulingClass=idle`.
+Embedding requests: `POST /v1/embeddings {"input": ["text", …]}`; an image is
+`{"input": [{"content": [{"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,…"}}]}]}`.
+Normalize vectors. Query text goes through `ss_core::query_text`, documents through `ss_core::doc_text`.
+
+Measured on the Pi (b11718, Q8_0): text ~100 tokens/s; a photo or frame ~3.9 s
+at any size (~81 tokens); photo search ranked the right photo first for all
+test queries, Indonesian included ("anjing" found the dog), but unrelated
+queries still score 0.50–0.62 against photos versus 0.72–0.80 for real
+matches, so photo cutoffs need the bench.
+
+## Protocol
+
+Newline-delimited JSON over `$XDG_RUNTIME_DIR/superspace.sock`; types in
+`crates/core/src/lib.rs` (`Request`, `Response`, `Row`, `Answer`). A search
+gets two responses with the same id: `phase: "instant"` (names, keywords,
+answer) within milliseconds, then `phase: "final"`. Clients drop responses
+whose id is not their latest. The daemon may skip the final phase of a search
+superseded on the same connection. `activate` runs the action in the daemon
+(one code path for UI, CLI and agents) and records the pick.
+
+```
+→ {"op":"search","id":7,"q":"golden retriever"}
+← {"id":7,"phase":"instant","rows":[…],"empty":false,"timing":{…}}
+← {"id":7,"phase":"final","rows":[{"key":"file:Videos/dog-park.mp4","kind":"video","title":"dog-park.mp4",
+     "subtitle":"~/Videos · 0:12, 0:47","icon":"mpv","action":{"type":"open","path":"…","locator":{}},
+     "score":0.78,"why":"meaning","hits":[{"locator":{"t":12.0,"t_end":16.0},"score":0.78,"text":"","thumb":"…/12.jpg"}]}],
+     "empty":false,"timing":{"instant_ms":2.1,"embed_ms":96,"total_ms":104}}
+→ {"op":"activate","id":8,"key":"file:Videos/dog-park.mp4","q":"golden retriever","hit":0}
+```
+
+Actions: PDFs open at the page (`evince -p N` when evince is the default,
+else `xdg-open`); audio/video at the moment (`mpv --start=T`); apps via
+`uwsm-app -- gtk-launch ID`; `paste` uses
+`omarchy-clipboard-paste-text`-style copy then Shift+Insert.
+
+## Ranking
+
+1. Candidates: fuzzy name match (nucleo-matcher) over titles and `names`;
+   FTS5 BM25 over part text; vector top-k over parts (brute-force dot product,
+   in memory).
+2. Parts group into one row per item; the row keeps its best parts as `hits`
+   (pages, slides, moments) and the best snippet with marks.
+3. Score = blend of name, keyword and meaning signals (weights tuned by the
+   bench), plus learned picks (frecency per item and per typed prefix, so
+   "te" → the app you always pick), plus preference boosts. Pins put an item
+   first for a query.
+4. Per-kind meaning cutoffs decide what counts as a real match; rows below
+   every cutoff and without a name/keyword match are dropped. Nothing left →
+   `empty: true`.
+5. Order: answer card (separate field) · top hit · then by score with gentle
+   kind grouping · web row last, always.
+
+## Preferences (`~/.config/superspace/preferences.toml`)
+
+Hot reloaded; the same edits are available as `Pref` requests, CLI
+(`superspace pref pin "lease" file:Documents/lease.pdf`) and MCP tools, so
+agents can change them.
+
+```toml
+prefer = ["I'm preparing an Omarchy meetup demo this month"]  # embedded; gently boosts related items
+[[pin]]   q = "lease"  key = "file:Documents/lease.pdf"
+[[boost]] path = "~/Documents/Meetup"  by = 0.10
+[[bury]]  kind = "clip"  by = 0.10
+[[exclude]] path = "~/Downloads/old"
+```
+
+`explain` returns every signal behind a row's score.
+
+## What to index (no settings needed)
+
+Roots: XDG Documents, Downloads, Music, Pictures, Videos, Desktop, plus
+`~/Work`, `~/Projects`, `~/Notes`, recursively; `$HOME` itself top level only.
+Skip: any dot-prefixed name; node_modules, bower_components, __pycache__,
+venv, .venv, site-packages, .tox, target/build/dist when gitignored or with
+CACHEDIR.TAG, Trash, lost+found; folders containing CACHEDIR.TAG, .nomedia or
+.noindex (the user's opt-out); temp/partial files (`*~ *.swp *.tmp *.part
+*.crdownload ~$*`), build output, databases, disk images, lockfiles, `*.min.js
+*.map`; binaries (NUL in first 8000 bytes); minified text (average line > 110
+chars). In git repos only gitignore-respecting files; source code is indexed by
+name, prose by content. Files over 50 MB: name only. At most 1 MiB of text
+per file. Do not follow symlinks. Rescan on inotify queue overflow.
+
+## Extraction (no new packages)
+
+`pdftotext -enc UTF-8` split on form feeds → one part per page. DOCX, XLSX
+(sharedStrings + every sheet, sheet names), PPTX (every slide + notes), ODT,
+ODS, ODP, EPUB: zip + XML. HTML: strip tags/script/style. Markdown/text: by
+heading/paragraph, ~800 characters per part with a small overlap, line
+locators. Images: tesseract OCR text as a part (only screenshots, Downloads,
+clipboard images) plus the image itself as `Embed::Image`.
+
+## Media
+
+- Photos: one `Embed::Image` part (scaled to ≤448 px) + OCR part if any text.
+- Video: `ffmpeg … select='gt(scene,0.3)+isnan(prev_selected_t)+gte(t-prev_selected_t,4)'`
+  frames at 448 px, one `Embed::Image` part per frame with `t`, `t_end`;
+  160 px thumbnails as hit thumbs; neighbouring frames above the cutoff merge
+  into one range. Audio track → transcript parts as for audio.
+- Speech: a local speech-to-text model with timestamps (media agent picks and
+  measures: official prebuilt binaries preferred), ~15 s transcript windows as
+  text parts with `t`; exact words go to FTS5 so spoken phrases hit by keyword.
+- Music: lyrics from tags (USLT/SYLT) or a sibling `.lrc` first; otherwise
+  transcribe. One part for the whole lyrics (theme: "songs about a breakup")
+  plus timed lines.
+- Media indexing runs on a separate background queue, at idle priority, after
+  all text is indexed.
+
+## Sources
+
+- Apps: desktop entries (user copies override system ones; NoDisplay/Hidden
+  removed), names + GenericName + Keywords as `names`, Comment as text.
+- Settings: `omarchy commands --json` and the Omarchy menu
+  (`/usr/share/omarchy/default/omarchy/omarchy-menu.jsonc` + user extension),
+  so "wifi connect" offers the Wi-Fi actions directly.
+- Emoji: Unicode emoji list + CLDR annotations (English and Indonesian),
+  embedded so "awkward" finds 😬; a row to open Omarchy's emoji picker.
+- Clipboard: `~/.local/state/omarchy/clipboard-history.json` (list of
+  `{text, type}`, newest first). Super Space records each new clip's source
+  (active window class + title from `hyprctl activewindow -j`, and the page URL
+  when it was a browser) and shows "from Chromium · Meetup notes".
+- Browser history: copy Chromium's `History` to $XDG_RUNTIME_DIR, read
+  `urls` (title, url, last_visit_time).
+
+## Answers
+
+Loose phrasing must work: `5'11" in cm`, `60 mph in km/h`, `1 gb in mb`,
+`1 tbsp in ml`, `15% of 80`, `half a mile in metres`, `100k idr in usd`,
+`1m idr to aud`, `20 bucks in aud`, `usd to idr`, `12pm here in london`,
+`3pm sydney in jakarta`, `time in berlin`. Home time zone from the system.
+Drawn as a two-sided card (input → output) like Raycast.
+
+## Agents
+
+`superspace search "q" --json [--kind file,video] [--limit N]`,
+`superspace read KEY [--part N] --json`, `superspace similar KEY`,
+`superspace explain "q" KEY`, `superspace pref …`; `superspace mcp` exposes
+the same as MCP tools (stdio JSON-RPC, no SDK); `skills/superspace/SKILL.md`
+tells agents to use it instead of ls/find/rg for the user's files.
+`superspace agents install|remove` registers both with Omarchy's agents.
+
+## UI
+
+Opens instantly on Super+Space (keepLoaded menu plugin). One list:
+answer card on top, then rows with app icon, title, subtitle, snippet with
+highlighted words, and for media a strip of moment thumbnails on a timeline.
+Keys: type to search · ↑/↓ or Ctrl+N/P move · Enter open · Ctrl+Enter
+alternative (reveal in folder / copy path) · ←/→ step through a row's hits
+(pages, moments) · Tab expand a row's hits · Ctrl+1…9 open row N · Ctrl+C
+copy answer or path · Esc close. Follows the Omarchy theme colours.
+
+## Demo-ready means
+
+`tests/run` passes on the Pi: budgets, golden queries (≥ 0.9 recall@5,
+correct top hit for the demo script), every "no results" query empty, web row
+always last, answers table, preferences, CLI/MCP parity, live add/delete,
+keyboard paths through the UI, and a fresh install from the repo.
