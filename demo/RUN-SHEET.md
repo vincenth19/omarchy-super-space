@@ -14,7 +14,7 @@ change both together.
 1. `superspace status`: `indexing` false, `media_queue` 0, `pending` 0 and
    `progress` null. `rates` is the last ECB business day (all of Tuesday in
    Brisbane that is Monday 19 Oct); currency answers use these cached rates
-   once the cable is out.
+   when Wi-Fi is off.
 2. Nothing else is busy: `pgrep -a llama-server` shows only ports 47801 and
    47802, `pgrep -a 'whisper-cli|ffmpeg'` shows nothing, and the first load
    average in `uptime` is under about 0.5.
@@ -24,34 +24,33 @@ change both together.
    never-searched queries means something is eating the CPU (go back to 2).
    A WARN row is a result that only just clears its cutoff: it passes now but
    is worth a look.
-5. Super+Space opens Super Space. The network cable is in.
+5. Super+Space opens Super Space.
 
-## On stage
+## On stage (about 4 minutes)
 
 Type at normal speed. Rows keep their place while you type; results by meaning
-land once you pause. Enter opens, Esc closes.
+land once you pause. Enter opens, Esc closes. Optional opener: turn Wi-Fi off
+first (currency uses cached rates), and say everything runs on this Pi.
 
-| # | Type | Show |
-|---|---|---|
-| 1 | Super+Space | It opens at once. Everything below runs on the Pi's CPU, nothing leaves it. |
-| 2 | `apartment lease bond` | The lease PDF, best hit page 3. Enter opens it at page 3. |
-| 3 | `where did we agree to hold the meetup` | The committee notes (.docx); its snippet names The Precinct. |
-| 4 | `pitch deck pricing` | The Kopi Club deck, slide 4. |
-| 5 | `quarterly sales spreadsheet` | The Bean There Q3 sales workbook. |
-| 6 | `golden retriever` | The photos, and the weekend video with its moments (0:10-0:30, 0:45-0:59). ←/→ steps through the moments, Tab shows them all, Enter plays from the moment. |
-| 7 | `anjing` | Indonesian for dog: the dog emoji first (that is their exact name), then the dog photos and the video. |
-| 8 | `the venue costs five hundred dollars` | The voice memo of 5 Oct, at 0:13. Enter plays from there. Spoken words are searchable. |
-| 9 | `songs about a breakup` | Empty Side of the Bed and Keys on the Counter, found by their lyrics. |
-| 10 | `100k idr in usd`, then `3pm sydney in jakarta` | Answer cards (about 6 USD; 11 am). Ctrl+C copies the answer. |
-| 11 | `wifi connect` | Omarchy's Network panel (Wi-Fi), a setting. |
-| 12 | `awkward` | 😬. Enter pastes it into the window you came from. |
-| 13 | `chromum` | Chromium, despite the typo. |
-| 14 | `byzantine empire timeline` | "Nothing on this computer matches", and only the web row. It does not pad with near misses. |
-| 15 | Terminal: `superspace search "apartment lease bond" --json` | The same rows for coding agents (also `superspace mcp`). |
-| 16 | Pull the network cable, repeat 2 and 6 | It all still works offline. |
+| # | Type | Show | Say |
+|---|---|---|---|
+| 1 | Super+Space | Opens at once. | "Spotlight that understands meaning, on a Raspberry Pi, offline." |
+| 2 | `apartment lease bond` | The lease PDF, page 3 highlighted. Enter opens it at page 3. | Text inside PDFs, Word, Excel, PowerPoint. |
+| 3 | `where did we agree to hold the meetup` | The committee notes; the snippet shows "…hold the October meetup at The Precinct". | A question, not keywords. |
+| 4 | `golden retriever` | Dog photos, and the weekend video with its dog moment (0:45). Enter plays from there. | One model reads text, photos and video. |
+| 5 | `the venue costs five hundred dollars` | The 5 Oct voice memo, at 0:13. | Spoken words are searchable. |
+| 6 | `songs about a breakup` | Empty Side of the Bed and Keys on the Counter. | Found by their lyrics. |
+| 7 | `anjing` | Dog emoji, then the dog photos. | Indonesian for dog: any language. |
+| 8 | `100k idr in usd`, `3pm sydney in jakarta`, `awkward`, `chromum` | 5.55 USD card; 11:00 AM card; 😬; Chromium despite the typo. | Quick answers, emoji, typos. |
+| 9 | `byzantine empire timeline` | "Nothing on this computer matches", only the web row, last. | It never pads with near misses, and never puts the web above your files. |
+| 10 | Terminal: `claude`, then "find my apartment lease and tell me the bond amount" | Claude calls Super Space (MCP) and answers $2,400, page 3 (about 20 s). | Agents use the same index instead of ls and grep. |
 
-Spares, if there is time: `tasmania camping trip` (the itinerary PDF), `set up
-a vpn on the raspberry pi` (the WireGuard notes).
+Close: one command to install (`omarchy plugin add https://github.com/vincenth19/omarchy-super-space --enable`), MIT, everything local.
+
+Spares, if there is time: `pitch deck pricing` (slide 4), `quarterly sales
+spreadsheet`, `wifi connect` (Omarchy's Network panel), `tasmania camping
+trip`, `set up a vpn on the raspberry pi`, or `superspace search "apartment
+lease bond" --json` in a terminal if Claude is slow.
 
 ## If something goes wrong
 
@@ -59,4 +58,4 @@ a vpn on the raspberry pi` (the WireGuard notes).
   `omarchy-shell shell toggle io.github.vincenth19.superspace '{}'`).
 - Only names and keywords come back: the query server is down;
   `systemctl --user restart superspace-embed`.
-- The projector fails: the 27 inch monitor on the side table.
+- Claude slow or offline: show `superspace search "apartment lease bond" --json` instead.
