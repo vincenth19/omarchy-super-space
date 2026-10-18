@@ -11,6 +11,10 @@ Canned queries (substring match, case-insensitive):
   dog / golden / park         video with moments + thumbs, photo, audio (one moment past an hour)
   awkward / smile / emoji     11 emoji rows, the emoji-picker setting after the ninth
   cm / usd / idr / % / 2+2    instant answer (plus whatever else matches)
+  100k idr in usd, 3pm sydney in jakarta, byzantine empire timeline
+                              per prefix as the live daemon answers them typed key by key: answers
+                              that come and go, empty: true beside an answer, rows that come and go
+  sheet                       markup in every indexed string (an <img> fetching 127.0.0.1:47806)
   qwxz / nothing              empty: true, only the web row
   slow <query>                the same, with the final phase after 1.5 s instead of 0.12 s
   anything else               apps and settings by prefix; the final phase puts a meaning hit on top
@@ -65,8 +69,38 @@ def web(q):
                {"type": "url", "url": "https://duckduckgo.com/?q=" + q}, 0.0, "keyword")
 
 
+def card(i, il, o, ol, copy, detail=""):
+    return {"kind": "units", "input": i, "input_label": il, "output": o, "output_label": ol, "copy": copy, "detail": detail}
+
+
+IMG = '<img src="http://127.0.0.1:47806/ss-mock.png">'
+TYPED = {  # query: (answer, local rows), as the live daemon gave them on 19 Oct; no rows is empty: true
+    "100k idr": (card("Rp 100,000", "Indonesian rupiah", "A$ 7.97", "Australian dollar", "7.97"), []),
+    "100k idr in usd": (card("Rp 100,000", "Indonesian rupiah", "US$ 5.55", "US dollar", "5.55"), []),
+    "3pm sydney": (card("3:00 PM", "Sydney", "2:00 PM", "Brisbane", "2:00 PM"), []),
+    "3pm sydney in ja": (None, ["flight-booking-bne-hba.txt", "2026-10-12 pengingat.m4a"]),
+    "3pm sydney in jakarta": (card("3:00 PM", "Sydney", "11:00 AM", "Jakarta", "11:00 AM"),
+                              ["flight-booking-bne-hba.txt", "2026-10-12 pengingat.m4a"]),
+    "byzantine empire timeline": (None, ["byzantium-notes.md"]),
+}
+
+
+def typed(s):
+    """A TYPED query or a longer prefix of one, else None. Prefixes without an entry have no
+    answer; for byzantine… one unrelated row on every third letter, else no rows."""
+    if s in TYPED:
+        return TYPED[s]
+    if s.startswith("3pm sydney in ja"):
+        return TYPED["3pm sydney in ja"]
+    if len(s) > 2 and any(k.startswith(s) for k in TYPED):
+        return None, ["unrelated page %d.html" % len(s)] if s.startswith("byz") and len(s) % 3 == 0 else []
+    return None
+
+
 def answer_for(q):
     s = q.lower()
+    if typed(s.strip()):
+        return typed(s.strip())[0]
     if re.fullmatch(r"[\d\s.+\-*/()]+", s) and re.search(r"\d\s*[-+*/]", s):
         try:
             v = eval(s, {"__builtins__": {}})  # digits and operators only, checked above
@@ -98,6 +132,22 @@ def respond(q, thumbs):
     answer = answer_for(q)
     if any(w in s for w in ("qwxz", "nothing")):
         return [web(q)], [web(q)], None, True, delay
+    if typed(s):
+        rows = [row("file:Documents/" + t, "file", t, "~/Documents", "text-x-generic",
+                    {"type": "open", "path": home + "/Documents/" + t, "locator": {}}, 0.6, "meaning") for t in typed(s)[1]]
+        return [web(q)], rows + [web(q)], answer, not rows, delay
+    if "sheet" in s:
+        xl = row("file:Downloads/Q3.xlsx", "file", "Q3 <b>budget</b>.<u>xlsx</u>", "~/Downloads · " + IMG, "x-office-spreadsheet",
+                 {"type": "open", "path": home + "/Downloads/Q3.xlsx", "locator": {}}, 0.7, "meaning",
+                 marked("Totals " + IMG + " & <i>sheet</i> notes", words),
+                 [{"locator": {"sheet": IMG, "row": 3}, "score": 0.7, "text": "row " + IMG},
+                  {"locator": {"sheet": "<b>Sheet2</b>", "row": 9}, "score": 0.6, "text": "<b>Sheet2</b> row"}])
+        charts = row("file:Downloads/Q3-charts.ods", "file", "Q3-charts.ods", "~/Downloads", "x-office-spreadsheet",
+                     {"type": "open", "path": home + "/Downloads/Q3-charts.ods", "locator": {}}, 0.6, "meaning",
+                     hits=[{"locator": {"sheet": IMG}, "score": 0.6, "text": "", "thumb": (thumbs or [""])[0]},
+                           {"locator": {"sheet": "<i>B</i>"}, "score": 0.5, "text": "", "thumb": (thumbs or [""])[0]}])
+        glyph = row("emoji:<b>😬</b>", "emoji", "<i>Grimacing</i> face", IMG, "", {"type": "paste", "text": "😬"}, 0.5, "meaning")
+        return [web(q)], [xl, charts, glyph, web(q)], card(IMG, "<b>in</b>", "<i>out</i>", IMG, "x", IMG), False, delay
     if any(w in s for w in ("lease", "contract", "pdf")):
         pdf = row("file:Documents/lease-2026.pdf", "file", "lease-2026.pdf", "~/Documents · p. 4, 9, 12",
                   "application-pdf", {"type": "open", "path": home + "/Documents/lease-2026.pdf", "locator": {"page": 4}},
@@ -126,7 +176,8 @@ def respond(q, thumbs):
                     {"type": "open", "path": home + "/Videos/dog-park.mp4", "locator": {"t": 47.0}}, 0.78, "meaning",
                     hits=moments)
         photo = row("file:Pictures/golden1.jpg", "image", "golden1.jpg", "~/Pictures · 12 Oct", t[0] or "image-x-generic",
-                    {"type": "open", "path": home + "/Pictures/golden1.jpg", "locator": {}}, 0.74, "meaning")
+                    {"type": "open", "path": home + "/Pictures/golden1.jpg", "locator": {}}, 0.74, "meaning",
+                    hits=[{"locator": {}, "score": 0.74, "text": "", "thumb": t[0]}])  # a photo's one hit is itself
         audio = row("file:Music/park-walk.mp3", "audio", "park-walk.mp3", "~/Music · spoken at 1:05, 1:02:05", "audio-x-generic",
                     {"type": "open", "path": home + "/Music/park-walk.mp3", "locator": {"t": 65.0}}, 0.6, "meaning",
                     marked("…and then the golden retriever ran across the whole park…", words),

@@ -12,17 +12,17 @@ keyboard.
 
 When the plugin loads and `~/.local/share/superspace/bin/superspace` does
 not exist (setup never ran), the box opens by itself and starts setup at once,
-so `omarchy plugin add … --enable` is the only command; this happens once per
-plugin load, and never when the binary exists. Otherwise, with no daemon five
-seconds after opening, and superspace.service not active
-(a daemon that is merely slow is left alone), it starts the plugin's
-`bin/superspace-setup --progress` as the systemd unit `superspace-setup`, so
-nothing in the shell can kill it mid-download, and follows the JSON lines it
-writes to `$XDG_RUNTIME_DIR/superspace-setup.jsonl` (a box opened again picks
-a running setup back up). It shows each step and download progress, and on
-`ask-bind` asks "Make Super+Space open Super Space?" (Enter yes, which runs
-`superspace-setup bind`; Esc no; only while the query is empty), then setup's
-"ready" line until the box closes.
+so `omarchy plugin add … --enable` is the only command. This is the only
+place setup starts: once per plugin load, never when the binary exists, and
+never because the daemon is slow or down (the box then says "Waiting for Super
+Space (superspace.service)…"). Setup is the plugin's
+`bin/superspace-setup --progress`, run as the systemd unit `superspace-setup`
+so nothing in the shell can kill it mid-download; the box follows the JSON
+lines it writes to `$XDG_RUNTIME_DIR/superspace-setup.jsonl`. It shows each
+step and download progress, and on `ask-bind` asks "Make Super+Space open
+Super Space?" (Enter yes, which runs `superspace-setup bind`; Esc no; only
+while the query is empty). Closing the box clears setup's message (an error,
+or "ready") unless setup is still running.
 
 Open it (the plugin binds no key until then):
 
@@ -72,8 +72,9 @@ over SSH set `XDG_RUNTIME_DIR` and `OMARCHY_PATH`.) `state` returns:
  "theme":{"background":"#1e1913","text":"#ebe1cc"}}
 ```
 
-`selected` indexes `rows` (-1 on the answer card, where `selectedKey` is
-`"answer"`); `hit` indexes the selected row's `hits` (null without hits);
+`phase` is `"final"` once the latest final phase is shown as it is, else
+`"instant"` (see typing below); `selected` indexes `rows` (-1 on the answer
+card, where `selectedKey` is `"answer"`); `hit` indexes the selected row's `hits` (null without hits);
 `activated` is the last `activate` sent; `perf` is the UI's own time per
 applied response (ms, model update and layout) since it opened; `setup` is
 setup's last progress line; `progress` is the latest response's indexing
@@ -83,18 +84,27 @@ Consecutive emoji rows are drawn as one strip of up to 8 (the rest are
 dropped). In `state` a strip is one row: `key` and `kind` of its first emoji,
 `hits` the number of emoji; `hit` is the picked emoji and `selectedKey` its
 key, which Enter, Ctrl+1…9 and Ctrl+C use. The subtitle names the picked emoji.
+Clicking an emoji pastes that emoji.
 
 While a response carries `"progress": {done, total, stage}`, a quiet line
 above the key hints says "Indexing · 1,240 of 2,800 · photos" (`stage`, what
 is embedded now, verbatim); it goes with the first response without it.
 
 Hits are labelled p. N (ch. N in an EPUB, whose parts are chapters), slide N,
-sheet · row N, line N, or a time as m:ss (h:mm:ss from an hour on). While
-typing, the list never shrinks: an instant phase's rows go on top of the last
-final phase's other rows (and its answer stays when the instant phase has
-none) until the next final phase replaces the whole list. The selection stays
-on the same key, and "Nothing on this computer matches" shows only after a
-final phase, until a row arrives.
+sheet · row N, line N, or a time as m:ss (h:mm:ss from an hour on). Photo
+rows draw no strip: the photo is the icon. Every indexed string (titles,
+subtitles, snippets, hit labels, sheet names, answers, emoji) is drawn as plain
+text; the snippet, which marks words with markup, escapes the text first.
+
+Calm while typing: until typing has paused for 400 ms, responses only add.
+New rows go on top of the rows on screen, a new answer replaces the card, and
+a response without an answer keeps it; "Nothing on this computer matches"
+does not appear. Once typing pauses, the latest final phase is shown as it
+is, so rows may drop and the card may go; a final phase arriving after the
+pause is shown as it is too. An instant phase always only adds (its final
+phase follows). The selection stays on the same key, except that a new answer
+(or a new value) takes it, so Enter and Ctrl+C act on the answer. The notice
+never shows with an answer card or a local row.
 
 ←/→ step through hits in the order they are drawn (page, slide, line or time),
 starting from the best one, so after Right `hit` is the index of the next
@@ -111,7 +121,9 @@ python3 ui/dev/mock_daemon.py [--sock PATH] [--thumbs DIR] [--log FILE] [--index
 ```
 
 Python stdlib only; canned two-phase answers for `lease`, `novel` (EPUB chapters), `golden retriever`,
-`awkward` (11 emoji, the picker setting after the ninth), `5'11" in cm`, `qwxz` (empty), `slow <query>` (final after 1.5 s)
-and app/setting prefixes; `--indexing` adds `progress` to every response for that many seconds. Point a dev shell at it with `SUPERSPACE_SOCK=PATH`
+`awkward` (11 emoji, the picker setting after the ninth), `5'11" in cm`, `qwxz` (empty), `slow <query>` (final after 1.5 s),
+app/setting prefixes, `sheet` (markup in every indexed string, its `<img>` pointing at 127.0.0.1:47806), and
+`100k idr in usd`, `3pm sydney in jakarta` and `byzantine empire timeline` with every prefix answered as the
+live daemon did (answers that come and go, `empty: true` beside an answer, rows that come and go); `--indexing` adds `progress` to every response for that many seconds. Point a dev shell at it with `SUPERSPACE_SOCK=PATH`
 when the real daemon has the default socket. It refuses to start when something already listens
 on the socket, and removes the socket on exit only if it is still its own.

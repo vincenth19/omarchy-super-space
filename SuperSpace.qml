@@ -10,9 +10,10 @@ import "ui"
 // menu plugin. It talks to `superspace serve` over one persistent socket
 // (DESIGN.md "Protocol"): each keystroke sends one search with a new id, and
 // only responses carrying the latest id are shown, the instant phase as soon
-// as it lands and the final phase in its place. Rows stay until new ones
-// arrive and the selection stays on the same key, so typing is calm (DESIGN.md
-// "UI"). Running a result is the daemon's job; this sends `activate`.
+// as it lands and the final phase in its place. While typing, responses only
+// add: rows, the answer card and the selection stay until typing pauses, so
+// typing is calm (DESIGN.md "UI"). Running a result is the daemon's job; this
+// sends `activate`.
 //
 // Colours, fonts, sizes, radii and transparency all come from Omarchy's
 // theme (Color, Style, Border): the same tokens Omarchy's own menu uses.
@@ -27,8 +28,9 @@ Item {
   property string phase: ""
   property var answer: null
   property var rows: []
-  property var settled: ({ rows: [] })  // the last final phase; an instant phase only adds rows on top of it
-  property bool empty: false    // "Nothing on this computer matches": a final phase said so and no row came since
+  property var shown: ({ rows: [] })  // what is on screen, as one response
+  property var last: ({})       // the latest final phase, shown as it is once typing pauses
+  property bool empty: false    // "Nothing on this computer matches": no local row and no answer
   property int sel: 0           // 0 is the answer card when there is one
   property string selKey: ""    // the key the selection stays on as responses arrive
   property int hit: 0           // the selected row's picked hit, an index into its hits
@@ -49,7 +51,7 @@ Item {
   function close() {
     opened = false
     field.text = ""
-    if (progress && progress.step === "ready") progress = null
+    if (!setup.running) progress = null
   }
 
   // ------------------------------------------------------------ daemon
@@ -75,34 +77,25 @@ Item {
   readonly property bool connected: sock !== null
 
   Timer {
-    property int tries: 0
     running: root.opened && !root.connected
     interval: 1000
     repeat: true
     triggeredOnStart: true
-    onRunningChanged: tries = 0
-    onTriggered: {
-      if (++tries === 6) setup.running = true
-      link.active = false
-      link.active = true
-    }
+    onTriggered: { link.active = false; link.active = true }
   }
 
-  // Still no daemon five seconds after opening: run the plugin's setup and
-  // show its progress (DESIGN.md "Setup"), unless superspace.service is up and
-  // merely slow. Setup runs as a systemd unit of its own, so closing the box,
-  // a plugin reload or a shell restart never kills it mid-download; this
-  // follows the JSON lines it writes to a file (and picks a running one back
-  // up): {step, message} or {step: "download", file, done, total}; "ask-bind"
-  // means it left Super+Space alone, so the box asks.
+  // The plugin's setup, with its progress shown in the box (DESIGN.md
+  // "Setup"). It runs as a systemd unit of its own, so closing the box, a
+  // plugin reload or a shell restart never kills it mid-download; this follows
+  // the JSON lines it writes to a file: {step, message} or {step: "download",
+  // file, done, total}; "ask-bind" means it left Super+Space alone, so the box asks.
   readonly property string pluginDir: decodeURIComponent(String(Qt.resolvedUrl(".")).replace(/^file:\/\//, ""))
   property var progress: null   // setup's last line
   property bool askBind: false
 
   Process {
     id: setup
-    command: ["sh", "-c", `systemctl --user -q is-active superspace.service && exit
-      systemctl --user -q is-active superspace-setup.service || { : >"$1"
+    command: ["sh", "-c", `systemctl --user -q is-active superspace-setup.service || { : >"$1"
         systemd-run --user -q --collect -u superspace-setup -p StandardOutput=append:"$1" -p StandardError=journal "$0" --progress; }
       exec tail -F -n +1 "$1" 2>/dev/null`, root.pluginDir + "bin/superspace-setup", Quickshell.env("XDG_RUNTIME_DIR") + "/superspace-setup.jsonl"]
     stdout: SplitParser {
@@ -117,7 +110,8 @@ Item {
 
   // Setup never ran (no daemon binary): open by itself and start setup, so
   // `omarchy plugin add … --enable` is the only command. Checked once per
-  // plugin load, never for a daemon that is merely slow. It cannot loop:
+  // plugin load; the only place setup starts, never for a daemon that is
+  // merely slow or down. It cannot loop:
   // setup's first step installs the binary, setup writes nothing in the
   // plugin folder (no reload), and the setup command never starts a second one.
   Process {
@@ -135,6 +129,7 @@ Item {
 
   function search(q) {
     seq += 1
+    typing.restart()
     if (!q.trim() || !send({ op: "search", id: seq, q: q }))
       show({ phase: "", rows: [] })
   }
@@ -152,16 +147,31 @@ Item {
     return hits.map(function(h, i) { return i }).sort(function(a, b) { return at(hits[a]) - at(hits[b]) || a - b })
   }
 
-  // The list never shrinks while typing: an instant phase puts its rows on top
-  // of the last final phase's other rows (and that answer, if it has none),
-  // and the next final phase replaces them all.
+  // Calm while typing: until typing pauses for 400 ms, a response only adds.
+  // Its rows go on top of the rows on screen, its answer replaces the card (no
+  // answer keeps it), and it never brings up the empty notice; shown so, a
+  // final phase counts as "instant". Once typing pauses, the latest final
+  // phase is shown as it is. An instant phase always only adds: its final follows.
+  Timer {
+    id: typing
+    interval: 400
+    onTriggered: if (root.last.id === root.seq && root.phase !== "final") root.show(root.last)
+  }
+
   function show(msg) {
-    var started = Date.now(), keep = selKey
-    if (msg.phase !== "instant") settled = msg
+    var started = Date.now(), keep = selKey, before = JSON.stringify(answer)
     var local = function(r) { return r.kind !== "web" }
-    var keys = msg.rows.map(function(r) { return r.key })
-    var all = msg.rows.filter(local).concat(settled.rows.filter(function(r) { return local(r) && keys.indexOf(r.key) < 0 }))
-    empty = settled.empty === true && !all.length
+    if (msg.phase === "final") last = msg
+    if (msg.phase === "instant" || (msg.phase && typing.running)) {
+      var keys = msg.rows.map(function(r) { return r.key })
+      var old = shown.rows.filter(function(r) { return local(r) && keys.indexOf(r.key) < 0 })
+      var kept = old.length || (shown.answer && !msg.answer) || (msg.empty && !shown.empty)
+      msg = { phase: kept ? "instant" : msg.phase, answer: msg.answer || shown.answer, empty: msg.empty && shown.empty,
+              progress: msg.progress, rows: msg.rows.filter(local).concat(old, msg.rows.filter(function(r) { return !local(r) })) }
+    }
+    shown = msg
+    var all = msg.rows.filter(local)
+    empty = msg.empty === true && !msg.answer && !all.length
     all = all.concat(msg.rows.filter(function(r) { return !local(r) }))
     // Consecutive emoji make one strip of up to 8: a row whose hits are the emoji.
     all = all.reduce(function(out, r) {
@@ -172,12 +182,13 @@ Item {
       return out
     }, [])
     all.forEach(function(r) { r._order = order(r.hits || []) })
-    answer = msg.answer || settled.answer || null
+    answer = msg.answer || null
     indexing = msg.progress || null
     rows = all
     phase = msg.phase
+    // A new answer (or a new value) takes the selection, so Enter and Ctrl+C act on it.
     var found = keep === "answer" ? (answer ? 0 : -1) : rows.findIndex(function(r) { return r.key === keep })
-    if (found < 0) { sel = 0; hit = 0; expanded = false }
+    if (found < 0 || (answer && JSON.stringify(answer) !== before)) { sel = 0; hit = 0; expanded = false }
     else sel = keep === "answer" ? 0 : found + offset
     if (current && hit >= (current.hits || []).length) hit = 0
     // Landing on the web row by default is not kept: local rows come first.
@@ -422,7 +433,10 @@ Item {
             hit: selected ? root.hit : 0
             expanded: selected && root.expanded
             notice: root.empty && modelData.kind === "web"
-            onClicked: root.activate(index + root.offset)
+            onClicked: function(pick) {
+              if (pick >= 0) { root.sel = index + root.offset; root.hit = pick }  // an emoji in a strip: pick it, then paste it
+              root.activate(index + root.offset)
+            }
           }
         }
 

@@ -4,9 +4,11 @@ import qs.Ui
 
 // One result (a `Row` from crates/core): icon, title, subtitle, the snippet
 // with its marked words, and the row's hits: page chips, or for video and
-// audio the moments in time order, as thumbnails when there are any. An emoji
-// row is a strip: its hits are emoji rows, drawn large, the picked one named
-// under them. Every colour, font, size and radius comes from Omarchy's theme.
+// audio the moments in time order, as thumbnails when there are any (a photo
+// is its own icon). An emoji row is a strip: its hits are emoji rows, drawn
+// large, the picked one named under them. Indexed text is always drawn as
+// plain text, never as markup. Every colour, font, size and radius comes from
+// Omarchy's theme.
 Column {
   id: root
 
@@ -16,12 +18,12 @@ Column {
   property int hit: 0            // the hit ←/→ picked: an index into item.hits
   property bool expanded: false  // Tab: every hit on a line of its own
   property bool notice: false    // nothing local matched: say so above this (web) row
-  signal clicked()
+  signal clicked(int pick)  // pick: the emoji clicked in a strip, else -1
 
   readonly property bool emoji: item.kind === "emoji"
   readonly property var hits: emoji ? [] : item.hits || []
   readonly property var order: emoji ? [] : item._order || []
-  readonly property bool thumbs: hits.some(function(h) { return !!h.thumb })
+  readonly property bool thumbs: item.kind !== "image" && hits.some(function(h) { return !!h.thumb })
   readonly property int iconSize: item.kind === "image" ? Style.space(56) : Style.space(28)
   readonly property color ink: selected ? Color.menu.selectedText : Color.menu.text
   // Secondary text is the theme's text colour dimmed, as in Omarchy's menu.
@@ -82,6 +84,12 @@ Column {
     color: root.selected ? Color.menu.selectedBackground : "transparent"
     borderSpec: root.selected ? Border.surfaceSpec("menu", "selected-border", Color.menu.selectedBorder, 0) : Border.none()
 
+    MouseArea {  // first, so an emoji's own area is above it
+      anchors.fill: parent
+      cursorShape: Qt.PointingHandCursor
+      onClicked: root.clicked(-1)
+    }
+
     Item {
       id: glyph
       x: Style.spacing.rowPaddingX
@@ -126,8 +134,10 @@ Column {
             Text {
               anchors.centerIn: parent
               text: String(modelData.key).slice(6) // "emoji:<emoji>"
+              textFormat: Text.PlainText
               font.pixelSize: Style.font.displayLarge
             }
+            MouseArea { anchors.fill: parent; onClicked: root.clicked(index) }
           }
         }
       }
@@ -213,6 +223,7 @@ Column {
               }
               Text {
                 text: root.where(moment.h.locator || {})
+                textFormat: Text.PlainText
                 color: moment.picked ? Color.accent : Color.menu.text
                 opacity: moment.picked ? 1 : root.dim
                 font.family: Style.font.menuFamily
@@ -234,6 +245,7 @@ Column {
             required property int modelData
             readonly property bool picked: root.selected && modelData === root.hit
             text: root.where(root.hits[modelData].locator || {})
+            textFormat: Text.PlainText
             color: picked ? Color.accent : Color.menu.text
             opacity: picked ? 1 : root.dim
             font.family: Style.font.menuFamily
@@ -267,16 +279,11 @@ Column {
       anchors.rightMargin: Style.spacing.rowPaddingX
       y: Style.spacing.lg
       text: root.kindLabel
+      textFormat: Text.PlainText
       color: root.ink
       opacity: root.dim
       font.family: Style.font.menuFamily
       font.pixelSize: Style.font.caption
-    }
-
-    MouseArea {
-      anchors.fill: parent
-      cursorShape: Qt.PointingHandCursor
-      onClicked: root.clicked()
     }
   }
 }
