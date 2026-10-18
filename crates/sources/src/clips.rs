@@ -83,13 +83,15 @@ fn text_doc(text: String, sources: &HashMap<String, Source>, urls: &HashMap<Stri
     // queries. A link copied in a browser embeds as "title: <page> | text:
     // <link>" (closer to the page's topic than "Chromium · <page>" or "link to
     // <site>"), any other link as "link to <site>" when the site is a name;
-    // commands, paths and codes are keywords only. Prose embeds as
-    // "title: Chromium · Meetup notes · https://… | text: <clip>".
+    // a command as "title: Terminal · ssh | text: ssh command: <cmd>" (finds
+    // "that ssh command" at 0.80 while nonsense stays under 0.62; the source
+    // app in place of Terminal raised nonsense to 0.65); paths and codes are
+    // keywords only. Prose embeds as "title: Chromium · Meetup notes · https://… | text: <clip>".
     let tab = src.filter(|s| browser(&s.class) && !page.is_empty()).map(|_| page);
     let input = match (link_site(&text), tab) {
         (Some(_), Some(tab)) => Some(doc_text(tab, &body)),
         (Some(site), None) => (site.contains('.') && site.contains(|c: char| c.is_ascii_alphabetic())).then(|| doc_text("", &format!("link to {site}"))),
-        (None, _) if bare(&text) => None,
+        (None, _) if bare(&text) => command(&text).map(|w| doc_text(&format!("Terminal · {w}"), &format!("{w} command: {body}"))),
         (None, _) => Some(doc_text(&src.map_or(String::new(), |s| join(&[&s.app, page, url])), &body)),
     };
     let stamp = sha1(input.as_deref().unwrap_or(&body));
@@ -136,6 +138,12 @@ fn bare(text: &str) -> bool {
     let toks: Vec<&str> = text.split_whitespace().collect();
     let words = toks.iter().filter(|t| t.trim_end_matches([',', '.', ':', ';', '!', '?']).chars().all(char::is_alphabetic)).count();
     !text.trim().contains('\n') && words * 2 <= toks.len()
+}
+
+/// "pacman" for "sudo pacman -Syu --noconfirm": a first word of lowercase
+/// letters and dashes (hex codes and ids such as "f47ac10b-…" have digits).
+fn command(text: &str) -> Option<&str> {
+    text.split_whitespace().find(|w| *w != "sudo").filter(|w| w.starts_with(|c: char| c.is_ascii_lowercase()) && w.chars().all(|c| c.is_ascii_lowercase() || c == '-'))
 }
 
 /// Chromium windows and Chromium web apps ("chrome-x.com__-Default").
@@ -261,7 +269,9 @@ mod tests {
             {"type":"text","text":"https://github.com/vincenth19/omarchy-super-space"},
             {"type":"text","text":"http://10.0.0.42:8080/admin"},
             {"type":"text","text":"ssh pi@10.0.0.42 -p 2222"},
-            {"type":"text","text":"~/Documents/lease.pdf"}
+            {"type":"text","text":"~/Documents/lease.pdf"},
+            {"type":"text","text":"sudo pacman -Syu --noconfirm"},
+            {"type":"text","text":"f47ac10b-58cc-4372-a567-0e02b2c3d479"}
         ]"##,
         )
         .unwrap();
@@ -284,7 +294,7 @@ mod tests {
         );
         assert_eq!(docs[0].key, "clip:23fa0cd44b128e1508c384b57a8b18e7264f1b54");
         assert_eq!(docs[0].action, Action::Paste { text: "https://omarchy.org/plugins".into() });
-        // Links by their page or site; commands, paths, codes and links to bare addresses keywords only.
+        // Links by their page or site, commands by their program; paths, codes and links to bare addresses keywords only.
         let embeds: Vec<Option<&str>> = docs.iter().map(|d| if let Embed::Text(t) = &d.parts[0].embed { Some(t.as_str()) } else { None }).collect();
         assert_eq!(
             embeds,
@@ -295,7 +305,9 @@ mod tests {
                 Some("title: Chromium · Meetup notes · https://docs.example/meetup | text: Doors open at 6pm, talks at 6:30"),
                 Some("title: none | text: link to github.com"),
                 None,
+                Some("title: Terminal · ssh | text: ssh command: ssh pi@10.0.0.42 -p 2222"),
                 None,
+                Some("title: Terminal · pacman | text: pacman command: sudo pacman -Syu --noconfirm"),
                 None,
             ]
         );
