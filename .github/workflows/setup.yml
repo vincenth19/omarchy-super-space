@@ -1,0 +1,18 @@
+name: setup
+
+on:
+  push:
+    paths: [bin/**, systemd/**, tests/setup/**, manifest.json, .github/workflows/setup.yml]
+  workflow_dispatch:
+
+jobs:
+  setup:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v5
+      # The models (about 870 MB), so a run downloads only the ones it deletes.
+      - uses: actions/cache@v4
+        with:
+          path: ~/setup-test/keep
+          key: setup-models-1
+      - run: WORK=~/setup-test tests/setup/test-setup.sh

@@ -80,7 +80,7 @@ fetch() {
   mkdir -p "$(dirname "$4")"
   say download "Downloading $name"
   if ! sum_ok "$4.part" "$2"; then
-    watch_size "$name" "$4.part" "$3" &
+    watch_size "$name" "$4.part" "$3" 9>&- &
     poll=$!
     curl -fsSL --retry 3 -C - -o "$4.part" "$1" || rc=$?
     kill "$poll" 2>/dev/null || true
@@ -140,7 +140,7 @@ real() {
   ! grep -q 'mise use -g' "$p" 2>/dev/null || mise which "$1" >/dev/null 2>&1
 }
 
-t() { timeout 60 "$@" </dev/null >/dev/null 2>&1; }
+t() { timeout 60 "$@" </dev/null >/dev/null 2>&1 9>&-; }
 
 # Each takes add|remove. Removing first makes a second add a no-op.
 claude_mcp() { t claude mcp remove --scope user superspace; [[ $1 == remove ]] || t claude mcp add --scope user superspace -- "$SS" mcp; }
@@ -209,7 +209,11 @@ unbind_key() {
 install_all() {
   ((EUID)) || die "run this as your own user, not root"
   local c u
-  for c in curl sha256sum tar jq systemctl; do command -v "$c" >/dev/null || die "needs $c"; done
+  for c in curl sha256sum tar jq systemctl flock; do command -v "$c" >/dev/null || die "needs $c"; done
+  # One setup at a time (the search box may have started one): a second waits.
+  mkdir -p "$SHARE"
+  exec 9>"$SHARE/.setup.lock"
+  flock -n 9 || { say wait "Another setup is running; waiting for it to finish"; flock 9; }
   # The search box runs this when it cannot connect. A daemon that is up, or
   # still starting, is left running.
   if ((PROGRESS)) && systemctl --user -q is-active superspace.service; then

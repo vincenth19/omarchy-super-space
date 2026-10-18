@@ -16,17 +16,32 @@ best match first.
 omarchy plugin add https://github.com/vincenth19/omarchy-super-space --enable
 ```
 
-The first time you open Super Space it finishes setting itself up: it
-downloads the model, the search engine and speech to text (about 1 GB, once)
-with the progress in the box, starts the services, sets up your coding agents
-and asks whether Super+Space should open it. Until then, open it with
-`omarchy-shell shell toggle io.github.vincenth19.superspace '{}'`.
+That is the only command. When the plugin first loads, the search box opens
+by itself and finishes the setup: it downloads the model, the search engine
+and speech to text (about 1 GB, once) with the progress in the box, starts
+the services, sets up your coding agents and asks once whether Super+Space
+should open it. No terminal, no sudo, no account, no GPU.
+
+Needs Omarchy 4 on aarch64 (a Raspberry Pi 5 is enough) or x86_64.
 
 Prefer a terminal? `~/.config/omarchy/plugins/io.github.vincenth19.superspace/bin/superspace-setup`
 does the same setup there. Run `superspace-setup` again any time to repair or
 update, and `superspace-setup doctor` to check that each piece works.
 
-Needs Omarchy 4 on aarch64 or x86_64. No GPU, no sudo, no account.
+## What runs in the background
+
+Three user services, nothing system-wide:
+
+| Service | What it does | Priority |
+|---|---|---|
+| `superspace` | the index and the search; watches your folders for changes | normal for searching; its indexing work runs at idle priority |
+| `superspace-embed` | the model for what you type, on 2 cores | normal, so a search never waits |
+| `superspace-embed-index` | the model for documents, photos and video frames | idle: only processor and disk time nothing else wants |
+
+Search by name and keyword works as soon as each file is read; meaning fills
+in behind it, text first, then photos, video and speech.
+`systemctl --user status 'superspace*'` shows the services and
+`journalctl --user -u superspace` their log.
 
 ## What it searches
 
@@ -73,7 +88,7 @@ files from GitHub and Hugging Face, checked against pinned checksums.
 Hidden files and folders are never indexed, nor is any folder containing a
 `.noindex`, `.nomedia` or `CACHEDIR.TAG` file.
 
-## Agents
+## For AI agents
 
 Setup gives your coding agents a skill and an MCP server, so they search your
 files by meaning instead of with `ls`, `find` and `grep`:
@@ -84,7 +99,11 @@ files by meaning instead of with `ls`, `find` and `grep`:
   `~/.claude/skills`, `~/.codex/skills`, `~/.pi/agent/skills` or
   `~/.hermes/skills`, Crush, Pi and Hermes included.
 
-The same commands work in a terminal:
+If you are an agent: read [skills/superspace/SKILL.md](skills/superspace/SKILL.md).
+Use the commands below with `--json` for the user's own files; `"empty": true`
+means nothing really matches. To install, run the `omarchy plugin add` line
+above; `superspace-setup doctor` exits 0 once every piece works and names the
+one that does not. Ask before passing `--yes`, which rebinds Super+Space.
 
 ```bash
 superspace search "lease agreement" --json
@@ -124,9 +143,10 @@ superspace-setup uninstall
 omarchy plugin remove io.github.vincenth19.superspace
 ```
 
-This stops the services and removes the downloads, the index, the agent setup
-and the Super+Space binding (your previous one comes back). Your preferences
-stay.
+This stops and removes the three services, the downloads, the index, the agent
+setup and the Super+Space binding (your previous one comes back). Run both: a
+plugin left in place sets itself up again when it next loads. Your preferences
+stay in `~/.config/superspace`; delete that folder too to leave nothing behind.
 
 ## Licence
 
