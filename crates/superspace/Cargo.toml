@@ -13,3 +13,7 @@ ss-answers.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+rusqlite = { version = "0.40", features = ["bundled"] }
+nucleo-matcher = "0.3"
+notify = "8"
+toml = "1"
