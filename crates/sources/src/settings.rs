@@ -86,20 +86,26 @@ pub(crate) fn files() -> Vec<PathBuf> {
 }
 
 pub fn settings() -> Vec<Doc> {
+    settings_checked().unwrap_or_default()
+}
+
+/// None when a menu file or shell.json exists but cannot be read or parsed,
+/// or `omarchy commands --json` fails.
+pub fn settings_checked() -> Option<Vec<Doc>> {
     let paths = files();
-    let texts: Vec<String> = paths[..2].iter().filter_map(|p| std::fs::read_to_string(p).ok()).collect();
-    let items = menu_items(&texts);
+    let texts = paths[..2].iter().filter(|p| p.exists()).map(std::fs::read_to_string).collect::<Result<Vec<_>, _>>().ok()?;
+    let items = menu_items(&texts)?;
     let conds: Vec<(&str, &str)> = items.iter().filter(|(_, i)| !i.when.is_empty()).map(|(id, i)| (id.as_str(), i.when.as_str())).collect();
     let ok = passing(&conds.iter().map(|c| c.1).collect::<Vec<_>>(), CHECKS);
     let failed: HashSet<&str> = conds.iter().enumerate().filter(|(n, _)| !ok.contains(n)).map(|(_, c)| c.0).collect();
-    let cmds = commands();
+    let cmds = commands()?;
     let summaries: HashMap<&str, &str> = cmds.iter().map(|c| (c.binary.as_str(), c.summary.as_str())).collect();
     let in_menu: HashSet<&str> = items.values().flat_map(|i| bins(&i.action)).collect();
     let mut docs = menu_docs(&items, &failed, &summaries);
-    docs.extend(panel_docs(&read_json(&paths[2]), &manifests()));
+    docs.extend(panel_docs(&read_json(&paths[2])?, &manifests()));
     docs.extend(command_docs(&cmds, &in_menu));
     docs.iter_mut().for_each(add_phrases);
-    docs
+    Some(docs)
 }
 
 /// A row's PHRASES become names (instant matches) and part of its embedded text.
@@ -110,11 +116,12 @@ fn add_phrases(d: &mut Doc) {
     (d.stamp, d.parts) = text_part(&d.title, body);
 }
 
-/// Menu items by id, the user's fields laid over the default ones, as Omarchy merges them.
-fn menu_items(texts: &[String]) -> BTreeMap<String, Item> {
+/// Menu items by id, the user's fields laid over the default ones, as Omarchy
+/// merges them. None when a file does not parse.
+fn menu_items(texts: &[String]) -> Option<BTreeMap<String, Item>> {
     let mut merged: BTreeMap<String, Map<String, Value>> = BTreeMap::new();
     for text in texts {
-        let Ok(Value::Object(mut top)) = serde_json::from_str(&strip_jsonc(text)) else { continue };
+        let Ok(Value::Object(mut top)) = serde_json::from_str(&strip_jsonc(text)) else { return None };
         if let Some(Value::Object(items)) = top.remove("items") {
             top = items;
         }
@@ -124,7 +131,7 @@ fn menu_items(texts: &[String]) -> BTreeMap<String, Item> {
             }
         }
     }
-    merged.into_iter().filter_map(|(id, f)| Some((id, serde_json::from_value(Value::Object(f)).ok()?))).collect()
+    Some(merged.into_iter().filter_map(|(id, f)| Some((id, serde_json::from_value(Value::Object(f)).ok()?))).collect())
 }
 
 /// Omarchy's JSONC: whole-line // comments and trailing commas.
@@ -164,13 +171,13 @@ fn sh(script: &str) -> Command {
     c
 }
 
-fn commands() -> Vec<Cmd> {
+fn commands() -> Option<Vec<Cmd>> {
     #[derive(Deserialize)]
     struct List {
         commands: Vec<Cmd>,
     }
-    let out = sh("omarchy commands --json").output().map(|o| o.stdout).unwrap_or_default();
-    serde_json::from_slice::<List>(&out).map(|l| l.commands).unwrap_or_default()
+    let out = sh("omarchy commands --json").output().ok()?;
+    serde_json::from_slice::<List>(&out.stdout).map(|l| l.commands).ok()
 }
 
 /// The omarchy-* commands a shell line calls.
@@ -242,7 +249,7 @@ fn manifests() -> Vec<Value> {
     [(omarchy().join("shell/plugins"), 3), (user, 2)]
         .iter()
         .flat_map(|(dir, depth)| files_under(dir, *depth, &|n| n == "manifest.json"))
-        .map(|p| read_json(&p))
+        .filter_map(|p| read_json(&p))
         .collect()
 }
 
@@ -314,7 +321,7 @@ mod tests {
 }"#;
 
     fn docs() -> Vec<Doc> {
-        let items = menu_items(&[MENU.into(), USER.into()]);
+        let items = menu_items(&[MENU.into(), USER.into()]).unwrap();
         let failed: HashSet<&str> = ["trigger.hardware.laptop-display", "setup"].into();
         let summaries: HashMap<&str, &str> = [("omarchy-toggle-nightlight", "Toggle nightlight screen temperature"), ("omarchy-theme-bg-set", "Set the current background image"), ("omarchy-theme-bg-switcher", "Open the Omarchy background switcher")].into();
         menu_docs(&items, &failed, &summaries)
@@ -329,6 +336,12 @@ mod tests {
     fn jsonc_comments_and_trailing_commas() {
         // Like Omarchy's regex, a ", ]" inside a string loses its comma too.
         assert_eq!(strip_jsonc("{\n  // x\n  \"a\": [1, 2,],\n  \"b\": \"x, ]\",\n}"), "{\n  \"a\": [1, 2],\n  \"b\": \"x ]\"\n}");
+    }
+
+    #[test]
+    fn a_torn_menu_file_is_a_failed_read() {
+        assert_eq!(menu_items(&[]).map(|m| m.len()), Some(0));
+        assert!(menu_items(&[MENU.into(), "{\n  \"trigger.toggle\": {\"label\":".into()]).is_none());
     }
 
     #[test]

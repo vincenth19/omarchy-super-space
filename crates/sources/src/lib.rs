@@ -6,6 +6,9 @@
 //! Stamps cover the embedded text only: a Doc whose subtitle or icon changed
 //! but whose text did not keeps its stamp (clip and history subtitles carry a
 //! relative time such as "2 h ago").
+//! The `*_checked` readers return None when a file they need exists but could
+//! not be read, so the daemon keeps the rows it has; the plain ones return no
+//! rows then.
 mod apps;
 mod clips;
 mod emoji;
@@ -13,10 +16,10 @@ mod history;
 mod settings;
 
 pub use apps::apps;
-pub use clips::{clips, track_clip_sources};
+pub use clips::{clips, clips_checked, track_clip_sources};
 pub use emoji::emoji;
-pub use history::history;
-pub use settings::settings;
+pub use history::{history, history_checked};
+pub use settings::{settings, settings_checked};
 
 use ss_core::{Embed, Locator, Part, doc_text};
 use std::path::{Path, PathBuf};
@@ -74,8 +77,13 @@ fn text_part(title: &str, body: String) -> (String, Vec<Part>) {
     (stamp, vec![Part { text: body, locator: Locator::default(), embed }])
 }
 
-fn read_json(path: &Path) -> serde_json::Value {
-    std::fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+/// A JSON file's contents: the default when the file does not exist, None
+/// when it cannot be read or parsed (a torn write), which is not an empty source.
+fn read_json<T: serde::de::DeserializeOwned + Default>(path: &Path) -> Option<T> {
+    if !path.exists() {
+        return Some(T::default());
+    }
+    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
 }
 
 /// Files under `dir`, at most `depth` levels down, whose name passes `keep`. Sorted.
@@ -103,6 +111,19 @@ mod tests {
         assert_eq!(ago(61), "1 min ago");
         assert_eq!(ago(2 * 3600 + 5), "2 h ago");
         assert_eq!(ago(3 * 86_400), "3 d ago");
+    }
+
+    #[test]
+    fn missing_json_is_empty_but_torn_json_is_a_failed_read() {
+        let path = std::env::temp_dir().join(format!("ss-sources-json-{}.json", std::process::id()));
+        assert_eq!(read_json::<Vec<u8>>(&path), Some(vec![]));
+        std::fs::write(&path, "[1, 2").unwrap();
+        assert_eq!(read_json::<Vec<u8>>(&path), None);
+        std::fs::write(&path, "").unwrap();
+        assert_eq!(read_json::<Vec<u8>>(&path), None);
+        std::fs::write(&path, "[1, 2]").unwrap();
+        assert_eq!(read_json::<Vec<u8>>(&path), Some(vec![1, 2]));
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

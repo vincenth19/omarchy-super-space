@@ -10,6 +10,12 @@ use std::process::{Command, Stdio};
 
 /// Under the daemon's state folder: {sha1 of clip text: Source}.
 pub(crate) const SOURCES: &str = "clip-sources.json";
+/// Run by `wl-paste --watch` with each new text clip on stdin: prints its
+/// hash, the one clips() computes for the entry Omarchy adds to its history.
+/// Copies that Omarchy's capture.sh leaves out of that history print nothing:
+/// a password manager's (CLIPBOARD_STATE=sensitive, or offered with
+/// x-kde-passwordManagerHint).
+const HASH_CLIP: &str = "[ \"$CLIPBOARD_STATE\" = sensitive ] || wl-paste --list-types 2>/dev/null | grep -qx x-kde-passwordManagerHint || sha1sum";
 /// Source records kept (Omarchy keeps 100 clips).
 const KEEP: usize = 500;
 
@@ -43,18 +49,19 @@ struct Clip {
 }
 
 pub fn clips(state: &Path) -> Vec<Doc> {
+    clips_checked(state).unwrap_or_default()
+}
+
+pub fn clips_checked(state: &Path) -> Option<Vec<Doc>> {
     let sources = load(state);
     // Page URLs come from Chromium's history, which can lag the copy by a few
     // seconds; the History file is watched, so a later read fills them in.
+    // Like history rows, they leave out the query and fragment.
     let urls: HashMap<String, String> = match sources.values().any(|s| browser(&s.class)) {
-        true => history::visits().into_iter().map(|v| (v.title, v.url)).collect(),
+        true => history::visits()?.into_iter().map(|v| (v.title, history::page(&v.url).into())).collect(),
         false => HashMap::new(),
     };
-    clip_docs(read_clips(), &sources, &urls, now())
-}
-
-fn read_clips() -> Vec<Clip> {
-    serde_json::from_value(read_json(&history_file())).unwrap_or_default()
+    Some(clip_docs(read_json(&history_file())?, &sources, &urls, now()))
 }
 
 fn clip_docs(list: Vec<Clip>, sources: &HashMap<String, Source>, urls: &HashMap<String, String>, now: i64) -> Vec<Doc> {
@@ -157,7 +164,7 @@ fn page_title(title: &str) -> &str {
 }
 
 fn load(state: &Path) -> HashMap<String, Source> {
-    serde_json::from_value(read_json(&state.join(SOURCES))).unwrap_or_default()
+    read_json(&state.join(SOURCES)).unwrap_or_default()
 }
 
 pub fn track_clip_sources(state: &Path) {
@@ -173,10 +180,8 @@ pub fn track_clip_sources(state: &Path) {
 /// Records the active window for every new text clip, until wl-paste exits
 /// (no Wayland session yet, compositor restart).
 fn watch(state: &Path) -> std::io::Result<()> {
-    // sha1sum reads each new text clip from wl-paste and prints its hash: the
-    // hash clips() computes for the entry Omarchy adds to its history.
     let mut child = Command::new("setpriv")
-        .args(["--pdeathsig", "TERM", "wl-paste", "--type", "text", "--watch", "sha1sum"])
+        .args(["--pdeathsig", "TERM", "wl-paste", "--type", "text", "--watch", "sh", "-c", HASH_CLIP])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -202,7 +207,7 @@ fn watch(state: &Path) -> std::io::Result<()> {
 
 /// sha1 of each history entry's text, newest first ("" for images).
 fn history_hashes() -> Vec<String> {
-    read_clips().iter().map(|c| if c.kind == "text" { sha1(&c.text) } else { String::new() }).collect()
+    read_json::<Vec<Clip>>(&history_file()).unwrap_or_default().iter().map(|c| if c.kind == "text" { sha1(&c.text) } else { String::new() }).collect()
 }
 
 fn active_window() -> Option<Source> {
@@ -312,6 +317,25 @@ mod tests {
             ]
         );
         assert_eq!(docs[7].parts[0].text, "~/Documents/lease.pdf");
+    }
+
+    #[test]
+    fn password_manager_copies_are_not_hashed() {
+        let dir = std::env::temp_dir().join(format!("ss-sources-wlpaste-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake = dir.join("wl-paste");
+        std::fs::write(&fake, "#!/bin/sh\nprintf '%s\\n' \"$TYPES\"\n").unwrap();
+        std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let path = format!("{}:{}", dir.display(), std::env::var("PATH").unwrap());
+        let hash = |state: &str, types: &str| {
+            let mut c = Command::new("sh").args(["-c", HASH_CLIP]).env("PATH", &path).env("CLIPBOARD_STATE", state).env("TYPES", types).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+            std::io::Write::write_all(&mut c.stdin.take().unwrap(), b"hunter2").unwrap();
+            String::from_utf8(c.wait_with_output().unwrap().stdout).unwrap()
+        };
+        assert_eq!(hash("data", "text/plain\nUTF8_STRING").split_whitespace().next(), Some(sha1("hunter2").as_str()));
+        assert_eq!(hash("sensitive", "text/plain"), "");
+        assert_eq!(hash("data", "text/plain\nx-kde-passwordManagerHint"), "");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
