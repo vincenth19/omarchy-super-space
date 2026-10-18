@@ -124,7 +124,12 @@ else `xdg-open`); audio/video at the moment (`mpv --start=T`); apps via
    every cutoff and without a name/keyword match are dropped. Nothing left →
    `empty: true`.
 5. Order: answer card (separate field) · top hit · then by score with gentle
-   kind grouping · web row last, always.
+   kind grouping · web row last, always. At most 3 emoji rows and 2 history
+   rows unless the query asks for them; at most 4 rows of one kind come before
+   the best row of each other kind that really matches. Under an answer card,
+   rows that match by meaning only must clear their cutoff by 0.03. A title
+   word one typo away from a query word of 5+ letters counts as a name match
+   ("chromum" → Chromium). Learning uses score order, not this placement.
 
 ### Learned scorer (decided 18 Oct)
 
@@ -141,9 +146,10 @@ pauses) ships only if it beats this on the bench.
 
 ### Setup (decided 18 Oct)
 
-`omarchy plugin add <repo> --enable` is the only command. On first open, with
-no daemon socket, the search box starts setup itself (a Process running
-`bin/superspace-setup --progress`, which writes JSON progress lines), shows
+`omarchy plugin add <repo> --enable` is the only command. When the plugin
+loads and `~/.local/share/superspace/bin/superspace` is missing, the box opens
+once and starts setup itself (`bin/superspace-setup --progress` in a transient
+user unit, JSON progress lines; a slow or stopped daemon never starts it), shows
 download progress inline, asks once whether Super+Space should open Super
 Space, and switches to search when the daemon answers. No sudo, no terminal.
 
@@ -189,10 +195,19 @@ clipboard images) plus the image itself as `Embed::Image`.
 ## Media
 
 - Photos: one `Embed::Image` part (scaled to ≤448 px) + OCR part if any text.
-- Video: `ffmpeg … select='gt(scene,0.3)+isnan(prev_selected_t)+gte(t-prev_selected_t,4)'`
-  frames at 448 px, one `Embed::Image` part per frame with `t`, `t_end`;
-  160 px thumbnails as hit thumbs; neighbouring frames above the cutoff merge
-  into one range. Audio track → transcript parts as for audio.
+- Video: frames at 448 px, one `Embed::Image` part per frame with `t`,
+  `t_end`; 160 px thumbnails as hit thumbs; neighbouring frames above the
+  cutoff merge into one range. Audio track → transcript parts as for audio.
+  Frames: the first, one a gap after the last, and one at each scene change
+  (ffmpeg scene > 0.3, at least 1 s after the last), but at most two per gap
+  on average. The gap is 8 s for videos over 2 minutes on machines with 4 or
+  fewer cores (the Pi 5 embeds a frame in ~3.9 s), 4 s otherwise;
+  `SUPERSPACE_FRAME_GAP` sets it,
+  and changing it re-indexes videos. Past 8 minutes the gap widens, so a video
+  gets at most 960 / gap frames (120 at 8 s). Near-black frames (fades, black
+  title cards) are skipped. ffmpeg, ffprobe, tesseract, whisper and pdftotext
+  run in an idle-weight systemd scope (else nice 19) and the daemon's indexing
+  threads at nice 19 / idle I/O, so indexing never slows a search.
 - Speech: a local speech-to-text model with timestamps (media agent picks and
   measures: official prebuilt binaries preferred), ~15 s transcript windows as
   text parts with `t`; exact words go to FTS5 so spoken phrases hit by keyword.
@@ -214,9 +229,13 @@ clipboard images) plus the image itself as `Embed::Image`.
 - Clipboard: `~/.local/state/omarchy/clipboard-history.json` (list of
   `{text, type}`, newest first). Super Space records each new clip's source
   (active window class + title from `hyprctl activewindow -j`, and the page URL
-  when it was a browser) and shows "from Chromium · Meetup notes".
+  when it was a browser) and shows "from Chromium · Meetup notes". Copies
+  Omarchy's capture.sh treats as sensitive (CLIPBOARD_STATE=sensitive or a
+  password-manager hint) get no source record.
 - Browser history: copy Chromium's `History` to $XDG_RUNTIME_DIR, read
-  `urls` (title, url, last_visit_time).
+  `urls` (title, url, last_visit_time). Rows are keyed, indexed and shown
+  without the query string and fragment (tokens live there); only opening the
+  row uses the full URL. A source that fails to read keeps its existing rows.
 
 ## Answers
 
@@ -233,7 +252,9 @@ Drawn as a two-sided card (input → output) like Raycast.
 `superspace explain "q" KEY`, `superspace pref …`; `superspace mcp` exposes
 the same as MCP tools (stdio JSON-RPC, no SDK); `skills/superspace/SKILL.md`
 tells agents to use it instead of ls/find/rg for the user's files.
-`superspace agents install|remove` registers both with Omarchy's agents.
+`superspace-setup` registers both with every installed agent (mise installs
+included). Agents can search clipboard and history too; `[[exclude]] kind =
+"clip"` or `"history"` turns that off, and excluded paths are never readable.
 
 ## UI
 
@@ -248,10 +269,11 @@ copy answer or path · Esc close.
 Calm while typing (decided 18 Oct, after watching it type): the instant
 phase still updates on every keystroke, but rows keep their place and the
 selection stays on the same key; the daemon starts the meaning search only
-after 150 ms with no newer query on that connection, so the final phase
-arrives once per pause, not once per letter; the previous rows stay until new
-ones arrive (never an empty flash); "Nothing on this computer matches" shows
-only after a final phase, never mid-word; no fade-out/fade-in between updates.
+after 150 ms with no newer query on that connection. Responses only add
+while typing: removals (rows dropping, the answer card going, "Nothing on this
+computer matches") wait until typing has paused 400 ms. A new answer takes the
+selection, and the empty notice never shows next to an answer. No
+fade-out/fade-in between updates.
 
 Icons: apps use their own icon; files use the icon of the app that opens
 their mime type on this machine (`xdg-mime query default`); the web row uses
