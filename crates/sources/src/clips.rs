@@ -15,7 +15,9 @@ pub(crate) const SOURCES: &str = "clip-sources.json";
 /// Copies that Omarchy's capture.sh leaves out of that history print nothing:
 /// a password manager's (CLIPBOARD_STATE=sensitive, or offered with
 /// x-kde-passwordManagerHint).
-const HASH_CLIP: &str = "[ \"$CLIPBOARD_STATE\" = sensitive ] || wl-paste --list-types 2>/dev/null | grep -qx x-kde-passwordManagerHint || sha1sum";
+// A skipped copy still drains its input: wl-paste --watch writes the clip to
+// this command and would die of SIGPIPE if nothing read it.
+const HASH_CLIP: &str = "if [ \"$CLIPBOARD_STATE\" = sensitive ] || wl-paste --list-types 2>/dev/null | grep -qx x-kde-passwordManagerHint; then cat >/dev/null; else sha1sum; fi";
 /// Source records kept (Omarchy keeps 100 clips).
 const KEEP: usize = 500;
 
