@@ -29,8 +29,9 @@ change both together.
 ## On stage (about 4 minutes)
 
 Type at normal speed. Rows keep their place while you type; results by meaning
-land once you pause. Enter opens, Esc closes. Optional opener: turn Wi-Fi off
-first (currency uses cached rates), and say everything runs on this Pi.
+land once you pause. Enter opens, Esc closes. Optional: turn Wi-Fi off for
+steps 2-9 to prove it is offline (currency uses cached rates), and back on
+before step 10, because Claude needs the internet.
 
 | # | Type | Show | Say |
 |---|---|---|---|
