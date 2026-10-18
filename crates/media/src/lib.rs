@@ -47,8 +47,9 @@ pub fn is_media(path: &Path) -> bool {
 }
 
 /// What `doc` puts in `Doc::stamp`, without the slow work: it changes when the
-/// file changes, when a song's sibling `.lrc` changes, and when speech to text
-/// gets installed (so media indexed before that gets its transcripts).
+/// file changes, when a song's sibling `.lrc` changes, when a video's frame gap
+/// changes, and when speech to text gets installed (so media indexed before that
+/// gets its transcripts).
 pub fn stamp(path: &Path, home: &Path) -> Option<String> {
     let kind = kind(path)?;
     let mtime = |p: &Path| {
@@ -60,6 +61,9 @@ pub fn stamp(path: &Path, home: &Path) -> Option<String> {
         && let Some(l) = mtime(&path.with_extension("lrc"))
     {
         s += &format!("-lrc{l}");
+    }
+    if kind == Kind::Video {
+        s += &format!("-g{}", frame_gap());
     }
     if kind != Kind::Image && whisper(home).is_some() {
         s += "-stt";
@@ -235,7 +239,7 @@ fn build(kind: Kind, path: &Path, home: &Path, dir: &Path) -> (Saved, bool) {
             }
         }
         Kind::Video => {
-            let frames = if has("video") { frames(path, dir, duration.unwrap_or(0.0), limit) } else { Some(Vec::new()) };
+            let frames = if has("video") { frames(path, dir, duration.unwrap_or(0.0), frame_gap(), limit) } else { Some(Vec::new()) };
             complete = frames.is_some();
             let frames = frames.unwrap_or_default();
             if let Some((first, _)) = frames.first() {
@@ -350,11 +354,23 @@ fn ocr(path: &Path, limit: Duration) -> Option<String> {
     (words >= 3).then_some(text)
 }
 
-/// Video frames at scene changes and at least every 4 s (sparser past 20 minutes: at
-/// most ~300 frames), 448 px, each with its 160 px thumbnail; with their times.
-fn frames(path: &Path, dir: &Path, duration: f32, limit: Duration) -> Option<Vec<(PathBuf, f32)>> {
-    let gap = (duration / 300.0).max(4.0);
-    let select = format!("select='isnan(prev_selected_t)+gte(t-prev_selected_t,{gap})+gt(scene,0.3)*gte(t-prev_selected_t,1)'");
+/// Seconds between video frames: `SUPERSPACE_FRAME_GAP` when set (8 if it is not a number),
+/// else 8 on machines with 4 or fewer cores (the Pi 5 takes ~3.9 s to embed a frame), else 4.
+fn frame_gap() -> f32 {
+    match std::env::var("SUPERSPACE_FRAME_GAP") {
+        Ok(g) => g.parse().unwrap_or(8.0),
+        Err(_) if !std::thread::available_parallelism().is_ok_and(|n| n.get() > 4) => 8.0,
+        Err(_) => 4.0,
+    }
+}
+
+/// Video frames, 448 px, each with its 160 px thumbnail, and their times: the first, one
+/// `gap` s after the last and one at each scene change, but at most two per `gap` s on
+/// average, so a film full of cuts stays cheap. Past 8 minutes the gap widens: a video
+/// gets at most 960 / `gap` frames (120 at 8 s).
+fn frames(path: &Path, dir: &Path, duration: f32, gap: f32, limit: Duration) -> Option<Vec<(PathBuf, f32)>> {
+    let gap = gap * (duration / 480.0).max(1.0);
+    let select = format!("select='isnan(prev_selected_t)+lt(selected_n*{gap},2*t)*(gte(t-prev_selected_t,{gap})+gt(scene,0.3)*gte(t-prev_selected_t,1))'");
     let out = run(Command::new("ffmpeg")
         .args(["-hide_banner", "-nostats", "-y", "-skip_frame", "noref", "-i"])
         .arg(path)

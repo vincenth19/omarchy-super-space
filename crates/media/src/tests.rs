@@ -154,11 +154,13 @@ fn video_frames_thumbs_cache_and_cleanup() {
         &path,
     );
     let d = doc(&path, &s.home(), &s.cache()).unwrap();
+    let gap = frame_gap();
     assert_eq!((d.key.as_str(), d.kind, d.title.as_str(), d.subtitle.as_str()), ("file:Videos/clip.mp4", Kind::Video, "clip.mp4", "~/Videos"));
+    assert!(d.stamp.ends_with(&format!("-g{gap}")), "{}", d.stamp);
     let times: Vec<(f32, f32)> = d.parts.iter().map(|p| (p.locator.t.unwrap(), p.locator.t_end.unwrap())).collect();
     println!("frames {times:?}");
     assert_eq!(times[0].0, 0.0);
-    assert!(times.windows(2).all(|w| w[1].0 - w[0].0 <= 4.1 && w[0].1 == w[1].0), "every 4 s, contiguous: {times:?}");
+    assert!(times.windows(2).all(|w| w[1].0 - w[0].0 <= gap + 0.1 && w[0].1 == w[1].0), "every {gap} s, contiguous: {times:?}");
     assert!(times.iter().any(|t| (10.0..10.5).contains(&t.0)), "the cut to blue at 10 s: {times:?}");
     assert!((times.last().unwrap().1 - 13.0).abs() < 0.1, "last frame lasts to the end");
     for p in &d.parts {
@@ -179,10 +181,37 @@ fn video_frames_thumbs_cache_and_cleanup() {
     let new = doc(&path, &s.home(), &s.cache()).unwrap();
     assert_ne!(new.stamp, d.stamp);
     assert!(!old.exists(), "old frames removed");
-    assert_eq!(new.parts.len(), 2, "0 s and 4 s");
+    assert_eq!(new.parts.len(), (5.0 / gap).ceil() as usize, "one per {gap} s of 5 s");
 
     forget(&path, &s.cache());
     assert!(!s.cache().join("media").read_dir().unwrap().any(|_| true), "forget empties the cache");
+}
+
+#[test]
+fn frames_at_every_cut_but_few() {
+    let s = Scratch::new("gap");
+    let times = |video: &Path, secs: f32, gap: f32| {
+        let dir = s.0.join(format!("{secs}-{gap}"));
+        fs::create_dir_all(&dir).unwrap();
+        frames(video, &dir, secs, gap, Duration::from_secs(120)).unwrap().into_iter().map(|f| f.1).collect::<Vec<f32>>()
+    };
+    // Like the demo's weekend clip (demo/corpus/truth.json): scenes from 0, 10, 30 and 45 s to 59 s.
+    let scenes = s.home().join("Videos/scenes.mp4");
+    let colour = "geq=r='255*(lt(T,10)+gte(T,30)*lt(T,45))':g='255*gte(T,10)*lt(T,30)':b='255*gte(T,45)'";
+    ffmpeg(&["-f", "lavfi", "-i", &format!("color=s=160x90:r=10:d=59,{colour}"), "-c:v", "libx264", "-pix_fmt", "yuv420p"], &scenes);
+    // Ten minutes of red and blue swapping every half second: a cut every 0.5 s.
+    let cuts = s.home().join("Videos/cuts.mp4");
+    let flip = "geq=r='255*lt(mod(T,1),0.5)':g=0:b='255*gte(mod(T,1),0.5)'";
+    ffmpeg(&["-f", "lavfi", "-i", &format!("color=s=64x48:r=4:d=600,{flip}"), "-c:v", "libx264", "-pix_fmt", "yuv420p"], &cuts);
+    for gap in [4.0, 8.0] {
+        let t = times(&scenes, 59.0, gap);
+        println!("gap {gap}: {t:?}");
+        assert!([10.0, 30.0, 45.0].iter().all(|&c| t.iter().any(|&f| (c..c + 0.5).contains(&f))), "a frame at each cut: {t:?}");
+        assert!(t[0] == 0.0 && t.windows(2).all(|w| w[1] - w[0] <= gap + 0.2) && t.len() as f32 <= 2.0 * 59.0 / gap, "{t:?}");
+        // Cuts beyond two per gap and minutes past eight do not add frames: at most 960 / gap.
+        let n = times(&cuts, 600.0, gap).len() as f32;
+        assert!((480.0 / gap..=960.0 / gap).contains(&n), "{n} frames at gap {gap}");
+    }
 }
 
 #[test]
