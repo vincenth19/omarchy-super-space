@@ -17,7 +17,8 @@ pub(crate) fn lines(path: &Path, ext: &str) -> Option<Lines> {
     let flow = |text: String| -> Lines { text.lines().map(|l| (Locator::default(), l.to_owned())).collect() };
     Some(match ext {
         "pdf" => {
-            let out = Command::new("timeout").args(["120", "pdftotext", "-q", "-enc", "UTF-8"]).arg(path).arg("-")
+            // Lowest CPU and I/O priority, like media's tools: indexing never slows down a search.
+            let out = Command::new("nice").args(["-n19", "ionice", "-c3", "timeout", "120", "pdftotext", "-q", "-enc", "UTF-8"]).arg(path).arg("-")
                 .stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
             let text = String::from_utf8_lossy(&out.stdout);
             let pages = text.split('\x0c').enumerate();
