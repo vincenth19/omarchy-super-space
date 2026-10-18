@@ -4,6 +4,7 @@
   tests/run                       everything, against the running daemon
   tests/run --only golden,live    some sections: golden budgets prefs parity live ui theme
   tests/run --tags demo           only golden cases with one of these tags
+  tests/run --demo                the demo script's queries in order, one pass/fail table (before going on stage)
   tests/run --self-test           prove the bench catches faults, using tests/fake_daemon.py
 
 Environment: SUPERSPACE_SOCK (default $XDG_RUNTIME_DIR/superspace.sock),
@@ -254,6 +255,11 @@ def pct(xs, p):
     return xs[min(len(xs) - 1, int(round(p / 100 * (len(xs) - 1))))] if xs else None
 
 
+def final_ms(t_final, timing):
+    """What the final budget judges: the daemon's total less its typing pause when it reports one."""
+    return timing["total_ms"] - timing["wait_ms"] if "wait_ms" in (timing or {}) else t_final
+
+
 # ------------------------------------------------------------------ sections
 
 def golden(rep, conn, cfg):
@@ -275,9 +281,9 @@ def golden(rep, conn, cfg):
         rep.add(name, not probs, f"{c['q']!r}: " + "; ".join(probs) if probs else "")
         if "want" in c:
             ranks.append(rank)
-        inst += [res["t_instant"]] if res["t_instant"] is not None else []
-        fin += [res["t_final"]] if res["t_final"] is not None else []
         f = res["final"] or {}
+        inst += [res["t_instant"]] if res["t_instant"] is not None else []
+        fin += [final_ms(res["t_final"], f.get("timing"))] if res["t_final"] is not None else []
         rows.append({"id": c["id"], "q": c["q"], "tags": c.get("tags", []), "ok": not probs, "why": "; ".join(probs), "rank": rank,
                      "t_instant_ms": res["t_instant"], "t_final_ms": res["t_final"], "daemon_timing": f.get("timing"),
                      "empty": f.get("empty"), "answer": f.get("answer"), "top": [r.get("key") for r in local_rows(f)[:5]],
@@ -737,7 +743,7 @@ def write_report(rep, cfg, started):
             rs = [r for r in g if tag in r["tags"]]
             lines.append(f"| {tag} | {sum(r['ok'] for r in rs)}/{len(rs)} |")
     if rep.data.get("budgets"):
-        lines += ["", "## Latency (ms, measured at the socket by this client)", "", "| What | n | p50 | p95 | max | p95 budget |", "|---|---|---|---|---|---|"]
+        lines += ["", "## Latency (ms, measured at the socket by this client; final is the daemon's total_ms less wait_ms when it reports wait_ms)", "", "| What | n | p50 | p95 | max | p95 budget |", "|---|---|---|---|---|---|"]
         lines += [f"| {k} | {v['n']} | {v['p50']} | {v['p95']} | {v['max']} | {v['budget_p95']} |" for k, v in rep.data["budgets"].items()]
     if rep.data.get("live"):
         lines += ["", "Live index: add {}, delete {} (budget {} s).".format(*(f"{v:.2f} s" if v is not None else "timed out" for v in rep.data["live"].values()), LIVE_S)]
@@ -757,6 +763,30 @@ def write_report(rep, cfg, started):
                                                     "sock": cfg.sock, "home": str(cfg.home), "checks": rep.checks, **rep.data},
                                                    indent=1, ensure_ascii=False, default=str) + "\n")
     return out
+
+
+def demo_table(rep):
+    """One screen: each demo-script query in order, pass/fail, rank, timings; returns the failure count."""
+    rows = {r["id"]: r for r in rep.data.get("golden", [])}
+    skips = {c["check"]: c["skip"] for c in rep.checks}
+    ms = lambda v: "-" if v is None else f"{v:.0f}"
+    print(f"{'':4} {'query':36} {'rank':>4} {'inst':>5} {'final':>5}  ms")
+    for c in (c for c in CASES if "demo" in c.get("tags", [])):
+        r = rows.get(c["id"])
+        if not r:
+            print(f"skip {c['q'][:36]:36}  {skips.get('golden:' + c['id']) or 'not run'}")
+            continue
+        note = r["why"] or ("= " + r["answer"]["output"] if r["answer"] else "")
+        print(f"{'ok' if r['ok'] else 'FAIL':4} {r['q'][:36]:36} {r['rank'] or '-':>4} {ms(r['t_instant_ms']):>5}"
+              f" {ms(final_ms(r['t_final_ms'], r['daemon_timing'])):>5}  {note[:90]}")
+    fails = rep.failures()
+    for c in fails:
+        if not c["check"].startswith("golden:"):
+            print(f"FAIL {c['check']}: {c['why'][:110]}")
+    lat = rep.data.get("latency") or {"instant_ms": [], "final_ms": []}
+    print(f"{sum(r['ok'] for r in rows.values())}/{len(rows)} pass; p95 instant {ms(pct(lat['instant_ms'], 95))} ms"
+          f" (budget {INSTANT_MS}), final {ms(pct(lat['final_ms'], 95))} ms (budget {FINAL_P95_MS})")
+    return len(fails)
 
 
 def run(cfg):
@@ -808,6 +838,7 @@ def config(args):
 
 FAULTS = {  # fault -> regex one failed check must match; "" must pass everything that runs
     "": None,
+    "wait": None,  # not a fault: a final late only by the daemon's reported typing pause is within budget
     "slow": r"^budget:(instant|final)",
     "no-instant": r"^budget:typing-instant-missing|^golden:demo-idr",
     "web-first": r"^rules:",
@@ -858,6 +889,12 @@ def self_test(args):
                 rep, path = run(cfg)
                 fails = [c["check"] for c in rep.failures() if not c["check"].startswith("theme:lint")]
                 good = not fails if expect is None else any(re.search(expect, f) for f in fails)
+                if fault in ("", "wrong-locator"):  # --demo: every demo query in order, failing just the cases with a locator
+                    p = subprocess.run([py, str(HERE / "run"), "--demo", "--sock", sock, "--out", str(tmp / "reports")], env=env, capture_output=True, text=True)
+                    got = [(line[:4], line[5:41].rstrip()) for line in p.stdout.splitlines() if line[:4] in ("ok  ", "FAIL", "skip")]
+                    demo = [c for c in CASES if "demo" in c.get("tags", [])]
+                    good &= [q for _, q in got] == [c["q"][:36].rstrip() for c in demo] and p.returncode == (1 if fault else 0) and \
+                        [q for s, q in got if s == "FAIL"] == [c["q"][:36].rstrip() for c in demo if fault and "at" in c]
                 ok &= good
                 print(f"{'ok  ' if good else 'FAIL'} fault={fault or 'none':14} {len(fails):3} failures, {now() - t0:5.1f} s"
                       + ("" if good else f"  expected {expect or 'no failures'}; got: {fails[:8]}"))
@@ -879,13 +916,18 @@ def main():
     ap.add_argument("--ui-actions", action="store_true", help="also press Enter in the UI (opens a document)")
     ap.add_argument("--allow-home-writes", action="store_true", help="let the live test write a file in your real ~/Documents")
     ap.add_argument("--out", default=str(HERE / "reports"))
+    ap.add_argument("--demo", action="store_true", help="only the demo script's queries, in order, as one table: a check before going on stage")
     ap.add_argument("--self-test", action="store_true")
     ap.add_argument("--keep", action="store_true", help="with --self-test: keep the clean run's report as tests/reports/self-test.md")
     args = ap.parse_args()
     if args.self_test:
         (HERE / "reports").mkdir(exist_ok=True)
         sys.exit(self_test(args))
+    if args.demo:
+        args.only, args.tags = "golden", "demo"
     rep, path = run(config(args))
+    if args.demo:
+        sys.exit(1 if demo_table(rep) else 0)
     fails = rep.failures()
     for c in fails:
         print(f"FAIL {c['check']}: {c['why']}")

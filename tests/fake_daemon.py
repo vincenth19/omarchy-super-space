@@ -12,7 +12,8 @@ bench passes) and anything else by plain keyword search over text files in
 its home (so live add/delete works). SUPERSPACE_FAKE_FAULTS (comma list)
 breaks it on purpose, so `tests/run --self-test` can prove each check fails
 when it should: slow, no-instant, web-first, pad, wrong-locator, prefs-noop,
-parity, slow-index, ui-stuck.
+parity, slow-index, ui-stuck. 'wait' is not a fault: finals come 300 ms late
+and say so in timing.wait_ms, as the real daemon's typing pause does.
 """
 import json
 import os
@@ -146,9 +147,10 @@ class Daemon:
             if "no-instant" not in FAULTS:
                 time.sleep(0.04 if slow else 0.001)
                 send(dict(base, phase="instant", timing={"instant_ms": (time.perf_counter() - t0) * 1000, "embed_ms": 0, "total_ms": 0}))
-            time.sleep(0.4 if slow else 0.02)
+            wait = 0.3 if "wait" in FAULTS else 0  # the daemon's typing pause, reported as wait_ms
+            time.sleep((0.4 if slow else 0.02) + wait)
             ms = (time.perf_counter() - t0) * 1000
-            send(dict(base, phase="final", timing={"instant_ms": 1.0, "embed_ms": ms - 1, "total_ms": ms}))
+            send(dict(base, phase="final", timing={"instant_ms": 1.0, "embed_ms": ms - 1, "total_ms": ms, **({"wait_ms": wait * 1000} if wait else {})}))
         elif op == "status":
             send({"id": rid, "value": {"home": str(self.home), "version": "fake", "items": sum(1 for _ in self.files())}})
         elif op == "prefs":
