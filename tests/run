@@ -1,0 +1,873 @@
+#!/usr/bin/env python3
+"""Super Space test bench (Python 3 stdlib only).
+
+  tests/run                       everything, against the running daemon
+  tests/run --only golden,live    some sections: golden budgets prefs parity live ui theme
+  tests/run --tags demo           only golden cases with one of these tags
+  tests/run --self-test           prove the bench catches faults, using tests/fake_daemon.py
+
+Environment: SUPERSPACE_SOCK (default $XDG_RUNTIME_DIR/superspace.sock),
+SUPERSPACE_BIN (CLI command, default `superspace`), SUPERSPACE_IPC (UI IPC
+command prefix, default `omarchy-shell superspace`), SUPERSPACE_HOME (the
+daemon's home when its status does not say), SUPERSPACE_UI_HOME (the desktop
+session's home, for the theme; default $HOME).
+
+Writes tests/reports/<time>.md and .json; exit status 1 when anything failed.
+--themes a,b,c switches the live Omarchy theme to screenshot the UI under
+each one and restores it afterwards: only run it when that is fine.
+"""
+import argparse
+import datetime
+import json
+import os
+import pathlib
+import platform
+import re
+import secrets
+import select
+import shlex
+import shutil
+import socket
+import statistics
+import subprocess
+import sys
+import tempfile
+import time
+
+HERE = pathlib.Path(__file__).resolve().parent
+ROOT = HERE.parent
+CASES = json.loads((HERE / "golden.json").read_text())["cases"]
+INSTANT_MS, FINAL_P95_MS, LIVE_S = 15, 250, 2.0
+SECTIONS = ["golden", "budgets", "prefs", "parity", "live", "ui", "theme"]
+LEASE = "file:Documents/Home/apartment-lease-new-farm-2026.pdf"
+CV = "file:Documents/Career/sam-rivera-cv-2026.pdf"
+TYPED = ["apartment lease bond", "golden retriever", "wifi connect", "the venue costs", "100k idr in usd"]
+now = time.perf_counter
+
+
+class Conn:
+    """One persistent socket connection, newline-delimited JSON."""
+
+    def __init__(self, path):
+        self.s = socket.socket(socket.AF_UNIX)
+        self.s.connect(path)
+        self.buf = b""
+        self.id = 1000
+
+    def send(self, req):
+        self.s.sendall((json.dumps(req, ensure_ascii=False) + "\n").encode())
+
+    def read(self, deadline):
+        while b"\n" not in self.buf:
+            left = deadline - now()
+            if left <= 0:
+                return None
+            self.s.settimeout(left)
+            try:
+                chunk = self.s.recv(65536)
+            except (socket.timeout, TimeoutError):
+                return None
+            if not chunk:
+                raise ConnectionError("the daemon closed the socket")
+            self.buf += chunk
+        line, self.buf = self.buf.split(b"\n", 1)
+        return json.loads(line)
+
+    def call(self, op, timeout=5, **kw):
+        self.id += 1
+        rid = self.id
+        self.send({"op": op, "id": rid, **kw})
+        end = now() + timeout
+        while (r := self.read(end)) is not None:
+            if r.get("id") == rid and "phase" not in r:
+                return r
+        return {"id": rid, "error": f"no answer to {op} within {timeout} s"}
+
+    def search(self, q, limit=30, timeout=5):
+        self.id += 1
+        rid, t0 = self.id, now()
+        self.send({"op": "search", "id": rid, "q": q, "limit": limit})
+        out = {"q": q, "instant": None, "final": None, "t_instant": None, "t_final": None}
+        end = t0 + timeout
+        while out["final"] is None and (r := self.read(end)) is not None:
+            if r.get("id") != rid:
+                continue
+            if "error" in r:
+                out["error"] = r["error"]
+                break
+            ms = (now() - t0) * 1000
+            if r.get("phase") == "instant" and out["instant"] is None:
+                out.update(instant=r, t_instant=ms)
+            elif r.get("phase") == "final":
+                out.update(final=r, t_final=ms)
+        return out
+
+
+class Report:
+    def __init__(self):
+        self.checks = []  # {"check", "ok", "why", "skip"}
+        self.data = {}
+
+    def add(self, check, ok, why="", skip=""):
+        self.checks.append({"check": check, "ok": bool(ok) and not skip, "why": why, "skip": skip})
+
+    def failures(self):
+        return [c for c in self.checks if not c["ok"] and not c["skip"]]
+
+
+def local_rows(resp):
+    return [r for r in (resp or {}).get("rows", []) if r.get("kind") != "web"]
+
+
+def rule_problems(resp, phase):
+    """Rules that hold for every search response (DESIGN.md, rules 1 and 2)."""
+    rows = resp.get("rows", [])
+    webs = [i for i, r in enumerate(rows) if r.get("kind") == "web"]
+    local = local_rows(resp)
+    p = []
+    if phase == "final" and len(webs) != 1:
+        p.append(f"{len(webs)} web rows in the final phase, want exactly 1")
+    if webs and webs != [len(rows) - 1]:
+        p.append(f"web row at position {webs[0] + 1} of {len(rows)}, want it last")
+    if resp.get("empty") and local:
+        p.append(f"empty is true but {len(local)} local rows came back")
+    if phase == "final" and not resp.get("empty") and not local:
+        p.append("no local rows, yet empty is false")
+    keys = [r.get("key") for r in rows]
+    if len(keys) != len(set(keys)):
+        p.append("duplicate keys: " + ", ".join(sorted({k for k in keys if keys.count(k) > 1})))
+    return p
+
+
+def matches(row, want):
+    for k, v in want.items():
+        if k == "key" and row.get("key") not in (v if isinstance(v, list) else [v]):
+            return False
+        if k == "kind" and row.get("kind") != v:
+            return False
+        if k == "title" and not re.search(v, row.get("title", "")):
+            return False
+    return True
+
+
+def describe(want):
+    parts = []
+    for k, v in want.items():
+        parts.append(f"{k} {v!r}" if not isinstance(v, list) else f"one of {len(v)} {k}s ({v[0]}, ...)")
+    return " and ".join(parts)
+
+
+def ranges(v):
+    return v if isinstance(v[0], list) else [v]
+
+
+def locator_problem(row, at):
+    hits = row.get("hits") or []
+    if not hits:
+        return f"right row, but it has no hits; expected a hit at {at}"
+    loc = hits[0].get("locator", {})
+    for k, v in at.items():
+        if k == "t":
+            t0 = loc.get("t")
+            t1 = loc.get("t_end", t0)
+            if t0 is None or not any(t0 <= hi + 1 and t1 >= lo - 1 for lo, hi in ranges(v)):
+                return f"right row, but its best hit is at {loc}, expected t within {v}"
+        elif loc.get(k) != v:
+            return f"right row, but its best hit is at {loc}, expected {k} {v!r}"
+    return ""
+
+
+def absent_problem(row, absent):
+    bad = [h["locator"] for h in row.get("hits") or [] if h.get("locator", {}).get("t") is not None
+           and any(lo + 1 < h["locator"]["t"] < hi - 1 for lo, hi in absent)]
+    return f"hits where the subject is not on screen: {bad} (absent in {absent})" if bad else ""
+
+
+def numbers(s):
+    return [float(x.replace(",", "")) for x in re.findall(r"-?\d[\d,]*(?:\.\d+)?", s)]
+
+
+def answer_problem(a, spec):
+    out = a.get("output", "")
+    if "kind" in spec and a.get("kind") != spec["kind"]:
+        return f"answer kind {a.get('kind')!r}, want {spec['kind']!r} (output {out!r})"
+    if "num" in spec and not any(abs(n - spec["num"]) <= spec.get("tol", 0.01) for n in numbers(out)):
+        return f"answer {out!r}, want {spec['num']} +/- {spec.get('tol', 0.01)}"
+    if "range" in spec and not any(spec["range"][0] <= n <= spec["range"][1] for n in numbers(out)):
+        return f"answer {out!r}, want a number in {spec['range']}"
+    if "re" in spec and not re.search(spec["re"], out):
+        return f"answer {out!r} does not match {spec['re']!r}"
+    return ""
+
+
+def missing_need(case, home):
+    for n in case.get("needs", []):
+        if n.startswith("clip:"):
+            f = home / ".local/state/omarchy/clipboard-history.json" if home else None
+            if not f or not f.exists() or n[5:] not in f.read_text(errors="ignore"):
+                return f"the clipboard history has no {n[5:]!r} (install the fixture with demo/install-to-home.sh)"
+        elif not pathlib.Path(n.replace("~", str(home or pathlib.Path.home()), 1)).exists():
+            return f"{n} does not exist on this machine"
+    return ""
+
+
+def check_case(c, res):
+    """Returns (problems, rank)."""
+    if res.get("error"):
+        return [f"daemon error: {res['error']}"], None
+    f = res["final"]
+    if f is None:
+        return ["no final phase within 5 s" + ("" if res["instant"] else ", and no instant phase")], None
+    local = local_rows(f)
+    top = ", ".join(r.get("key", "?") for r in local[:3]) or "nothing"
+    probs, rank = [], None
+    if c.get("empty") and (not f.get("empty") or local):
+        probs.append(f"should find nothing, got empty={f.get('empty')} with {len(local)} local rows: {top}")
+    if "answer" in c:
+        a = f.get("answer")
+        if not a:
+            probs.append(f"no answer card (rows: {top})")
+        else:
+            if why := answer_problem(a, c["answer"]):
+                probs.append(why)
+            if not (res["instant"] or {}).get("answer"):
+                probs.append("the answer came only in the final phase, not the instant one")
+    if "want" in c:
+        rank = next((i for i, r in enumerate(local, 1) if matches(r, c["want"])), None)
+        allowed = c.get("rank", 1)
+        if rank is None:
+            probs.append(f"no row with {describe(c['want'])} among {len(local)} results; top: {top}")
+        elif rank > allowed:
+            above = ", ".join(r.get("key", "?") for r in local[:rank - 1][:3])
+            probs.append(f"{describe(c['want'])} at rank {rank}, want <= {allowed}; above it: {above}")
+        else:
+            row = local[rank - 1]
+            for why in (locator_problem(row, c["at"]) if "at" in c else "", absent_problem(row, c["absent"]) if "absent" in c else ""):
+                if why:
+                    probs.append(why)
+    return probs, rank
+
+
+def pct(xs, p):
+    xs = sorted(xs)
+    return xs[min(len(xs) - 1, int(round(p / 100 * (len(xs) - 1))))] if xs else None
+
+
+# ------------------------------------------------------------------ sections
+
+def golden(rep, conn, cfg):
+    for q in ("warm up", "lease", "dog"):
+        conn.search(q)
+    rows, ranks, inst, fin = [], [], [], []
+    for c in CASES:
+        if cfg.tags and not set(cfg.tags) & set(c.get("tags", [])):
+            continue
+        name = f"golden:{c['id']}"
+        if skip := missing_need(c, cfg.home):
+            rep.add(name, False, skip=skip)
+            continue
+        res = conn.search(c["q"])
+        for phase in ("instant", "final"):
+            if res[phase] and (rp := rule_problems(res[phase], phase)):
+                rep.add(f"rules:{c['id']}:{phase}", False, f"{c['q']!r}: " + "; ".join(rp))
+        probs, rank = check_case(c, res)
+        rep.add(name, not probs, f"{c['q']!r}: " + "; ".join(probs) if probs else "")
+        if "want" in c:
+            ranks.append(rank)
+        inst += [res["t_instant"]] if res["t_instant"] is not None else []
+        fin += [res["t_final"]] if res["t_final"] is not None else []
+        f = res["final"] or {}
+        rows.append({"id": c["id"], "q": c["q"], "tags": c.get("tags", []), "ok": not probs, "why": "; ".join(probs), "rank": rank,
+                     "t_instant_ms": res["t_instant"], "t_final_ms": res["t_final"], "daemon_timing": f.get("timing"),
+                     "empty": f.get("empty"), "answer": f.get("answer"), "top": [r.get("key") for r in local_rows(f)[:5]]})
+    n = len(ranks)
+    rep.data["golden"] = rows
+    rep.data["metrics"] = {
+        "cases_with_expected_row": n,
+        "recall@1": round(sum(1 for r in ranks if r == 1) / n, 3) if n else None,
+        "recall@5": round(sum(1 for r in ranks if r and r <= 5) / n, 3) if n else None,
+        "mrr": round(sum(1 / r for r in ranks if r) / n, 3) if n else None,
+    }
+    rep.data["latency"] = {"instant_ms": inst, "final_ms": fin}
+
+
+def typing(rep, conn):
+    """Type each query a character every 80 ms on one connection, as the UI does."""
+    per_key = []
+    for q in TYPED:
+        sent, got, last = {}, {}, None
+
+        def record(r):
+            rid = r.get("id")
+            if rid in sent and r.get("phase"):
+                got.setdefault(rid, {})[r["phase"]] = (now() - sent[rid]) * 1000
+                if rp := rule_problems(r, r["phase"]):
+                    rep.add(f"rules:typing:{q[:12]}", False, f"typing {q!r}: " + "; ".join(rp))
+        for i in range(1, len(q) + 1):
+            conn.id += 1
+            last = conn.id
+            sent[last] = now()
+            conn.send({"op": "search", "id": last, "q": q[:i], "limit": 30})
+            end = now() + 0.08
+            while (r := conn.read(end)) is not None:
+                record(r)
+        end = now() + 5
+        while "final" not in got.get(last, {}) and (r := conn.read(end)) is not None:
+            record(r)
+        end = now() + 0.1
+        while (r := conn.read(end)) is not None:
+            record(r)
+        missing = sum(1 for rid in sent if "instant" not in got.get(rid, {}))
+        rep.add(f"budget:typing-final:{q}", "final" in got.get(last, {}),
+                f"typing {q!r}: no final phase for the last keystroke within 5 s")
+        if missing:
+            rep.add(f"budget:typing-instant-missing:{q}", False, f"typing {q!r}: {missing} of {len(sent)} keystrokes got no instant phase")
+        per_key += [v["instant"] for v in got.values() if "instant" in v]
+        rep.data.setdefault("typing", []).append({"q": q, "keystrokes": len(sent), "missing_instant": missing,
+                                                  "final_after_last_key_ms": got.get(last, {}).get("final")})
+    return per_key
+
+
+def budgets(rep, conn, cfg):
+    lat = rep.data.get("latency") or {"instant_ms": [], "final_ms": []}
+    keys = typing(rep, conn)
+    table = {}
+    for name, xs, budget, p in (("instant (golden queries)", lat["instant_ms"], INSTANT_MS, 95),
+                                ("instant (each keystroke)", keys, INSTANT_MS, 95),
+                                ("final (golden queries)", lat["final_ms"], FINAL_P95_MS, 95)):
+        if not xs:
+            rep.add(f"budget:{name}", False, skip="no measurements (run with the golden section)")
+            continue
+        row = {"n": len(xs), "p50": round(pct(xs, 50), 1), "p95": round(pct(xs, 95), 1), "max": round(max(xs), 1), "budget_p95": budget}
+        table[name] = row
+        rep.add(f"budget:{name.split()[0]}:{name.split('(')[1][:-1].replace(' ', '-')}", row["p95"] < budget,
+                f"{name}: p95 {row['p95']} ms, budget {budget} ms (p50 {row['p50']}, max {row['max']}, n {row['n']})")
+    rep.data["budgets"] = table
+    exe = shutil.which(cfg.bin[0]) if cfg.bin else None
+    if exe and "python" not in os.path.basename(exe):
+        mb = os.path.getsize(os.path.realpath(exe)) / 1e6
+        rep.add("budget:binary-size", mb < 15, f"{exe} is {mb:.1f} MB, budget 15 MB")
+    st = rep.data.get("status") if isinstance(rep.data.get("status"), dict) else {}
+    if st.get("rss_mb") is not None:
+        rep.add("budget:daemon-memory", st["rss_mb"] < 150, f"the daemon is {st['rss_mb']} MB resident with {st.get('parts')} parts, budget 150 MB at 50k parts")
+
+
+def prefs(rep, conn, cfg):
+    saved = conn.call("prefs")
+    if "error" in saved:
+        rep.add("prefs:read", False, f"prefs request failed: {saved['error']}")
+        return
+    saved = saved["value"]
+    rep.data["prefs_before"] = saved
+
+    applied = []
+
+    def change(c):
+        r = conn.call("pref", change=c)
+        (op, val), = c.items()
+        if "error" not in r and val not in saved.get(op, []):
+            applied.append({"un" + op: val})
+        return r.get("error", "")
+
+    def score(q, key):
+        return next((r.get("score") for r in local_rows(conn.search(q)["final"]) if r.get("key") == key), None)
+    try:
+        err = change({"pin": {"q": "lease", "key": CV}})
+        top = (local_rows(conn.search("lease")["final"]) or [{}])[0]
+        rep.add("prefs:pin", not err and top.get("key") == CV and top.get("why") == "pinned",
+                err or f"pinned {CV} for 'lease', but the top row is {top.get('key')} (why {top.get('why')})")
+
+        first = lambda q, kind: next((r for r in local_rows(conn.search(q)["final"]) if r.get("kind") == kind), {})
+        img = first("golden retriever", "image")
+        before = img.get("score")
+        err = change({"bury": {"kind": "image", "by": 0.10}})
+        after = score("golden retriever", img.get("key"))
+        rep.add("prefs:bury", not err and before is not None and after is not None and after <= before - 0.05,
+                err or (f"buried images by 0.10: {img.get('key')} scored {before} before, {after} after" if img
+                        else "no image row for 'golden retriever', so burying images could not be measured"))
+
+        key = "file:Documents/Recipes/banana-bread.md"
+        before = score("banana bread recipe", key)
+        err = change({"boost": {"path": "~/Documents/Recipes", "by": 0.10}})
+        after = score("banana bread recipe", key)
+        rep.add("prefs:boost", not err and before is not None and after is not None and after >= before + 0.05,
+                err or (f"boosted ~/Documents/Recipes by 0.10: {key} scored {before} before, {after} after" if before is not None
+                        else f"{key} is not a result for 'banana bread recipe', so the boost could not be measured"))
+
+        row = next((r for r in local_rows(conn.search("apartment lease bond")["final"]) if r.get("key") == LEASE), {})
+        ex = conn.call("explain", q="apartment lease bond", key=LEASE)
+        v = ex.get("value")
+        ok = isinstance(v, dict) and v and (not isinstance(v.get("score"), (int, float)) or abs(v["score"] - row.get("score", v["score"])) < 0.02)
+        rep.add("prefs:explain", ok, f"explain returned {ex.get('error') or v!r} for a row scored {row.get('score')}")
+        rep.data["explain"] = v
+    finally:
+        err = "; ".join(e for c in reversed(applied) if (e := conn.call("pref", change=c).get("error")))
+        back = conn.call("prefs").get("value")
+        top = (local_rows(conn.search("lease")["final"]) or [{}])[0]
+        rep.add("prefs:restore", not err and back == saved and top.get("why") != "pinned",
+                f"could not restore preferences ({err or 'they differ'}); restore by hand to: {json.dumps(saved)}")
+
+
+class Mcp:
+    def __init__(self, argv):
+        self.p = subprocess.Popen(argv + ["mcp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        self.n = 0
+
+    def call(self, method, params=None, timeout=10):
+        self.n += 1
+        self.p.stdin.write(json.dumps({"jsonrpc": "2.0", "id": self.n, "method": method, "params": params or {}}) + "\n")
+        self.p.stdin.flush()
+        end = now() + timeout
+        while now() < end:
+            if select.select([self.p.stdout], [], [], end - now())[0]:
+                line = self.p.stdout.readline()
+                if not line:
+                    break
+                msg = json.loads(line)
+                if msg.get("id") == self.n:
+                    return msg
+        raise TimeoutError(f"no MCP reply to {method}")
+
+    def notify(self, method):
+        self.p.stdin.write(json.dumps({"jsonrpc": "2.0", "method": method}) + "\n")
+        self.p.stdin.flush()
+
+    def close(self):
+        self.p.kill()
+
+
+def rows_of(obj):
+    if isinstance(obj, dict) and "structuredContent" in obj:
+        obj = obj["structuredContent"]
+    if isinstance(obj, dict) and "content" in obj:
+        obj = json.loads(obj["content"][0]["text"])
+    return obj.get("rows", []) if isinstance(obj, dict) else obj
+
+
+def parity(rep, conn, cfg):
+    if not cfg.bin:
+        rep.add("parity", False, skip="the superspace CLI is not on PATH (set SUPERSPACE_BIN)")
+        return
+    qs = list(dict.fromkeys(c["q"] for c in CASES if "demo" in c.get("tags", []) and "answer" not in c))
+    mcp, tool = None, None
+    try:
+        mcp = Mcp(cfg.bin)
+        mcp.call("initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "superspace-bench", "version": "1"}})
+        mcp.notify("notifications/initialized")
+        tools = [t["name"] for t in mcp.call("tools/list")["result"]["tools"]]
+        tool = next((t for t in tools if "search" in t), None)
+        rep.add("parity:mcp-tools", bool(tool), f"no search tool among MCP tools {tools}")
+    except Exception as e:
+        rep.add("parity:mcp-start", False, f"superspace mcp did not start or answer: {e}")
+    cli_ms = []
+    for q in qs:
+        want = [r.get("key") for r in local_rows(conn.search(q)["final"])][:5]
+        t0 = now()
+        try:
+            out = subprocess.run(cfg.bin + ["search", q, "--json"], capture_output=True, text=True, timeout=15)
+            cli = [r.get("key") for r in rows_of(json.loads(out.stdout)) if r.get("kind") != "web"][:5]
+            why = f"{q!r}: CLI top {cli}, socket top {want}"
+        except Exception as e:
+            cli, why = None, f"{q!r}: superspace search --json failed: {e}"
+        cli_ms.append((now() - t0) * 1000)
+        rep.add(f"parity:cli:{q}", cli == want, why)
+        if tool:
+            try:
+                res = mcp.call("tools/call", {"name": tool, "arguments": {"q": q}})
+                got = [r.get("key") for r in rows_of(res["result"]) if r.get("kind") != "web"][:5]
+                rep.add(f"parity:mcp:{q}", got == want, f"{q!r}: MCP top {got}, socket top {want}")
+            except Exception as e:
+                rep.add(f"parity:mcp:{q}", False, f"{q!r}: MCP {tool} failed: {e}")
+    if mcp:
+        mcp.close()
+    rep.data["cli_wall_ms"] = {"p50": round(pct(cli_ms, 50), 1), "max": round(max(cli_ms), 1)} if cli_ms else None
+
+
+def live(rep, conn, cfg):
+    home = cfg.home
+    if not home or not (home / "Documents").is_dir():
+        rep.add("live", False, skip=f"no Documents folder in the daemon's home {home}")
+        return
+    if home.resolve() == pathlib.Path.home().resolve() and not cfg.allow_home_writes:
+        rep.add("live", False, skip="the daemon watches your real home; pass --allow-home-writes to let the bench write a file in ~/Documents")
+        return
+    token = "zqx" + secrets.token_hex(4)
+    rel = f"Documents/superspace-bench-{token}.md"
+    path, key = home / rel, "file:" + rel
+
+    def wait(present, limit=10):
+        t0 = now()
+        while now() - t0 < limit:
+            keys = [r.get("key") for r in local_rows(conn.search(token)["final"])]
+            if (key in keys) == present:
+                return now() - t0
+            time.sleep(0.1)
+        return None
+    try:
+        path.write_text(f"# Bench note\n\nThe {token} marmalade budget for the picnic is forty dollars.\n")
+        t_add = wait(True)
+        rep.add("live:add", t_add is not None and t_add < LIVE_S,
+                f"a new file became searchable after {t_add:.2f} s, budget {LIVE_S} s" if t_add is not None else f"a new file was not searchable after 10 s ({rel})")
+    finally:
+        path.unlink(missing_ok=True)
+    t_del = wait(False)
+    rep.add("live:delete", t_del is not None and t_del < LIVE_S,
+            f"a deleted file disappeared after {t_del:.2f} s, budget {LIVE_S} s" if t_del is not None else "a deleted file was still a result after 10 s")
+    rep.data["live"] = {"add_s": t_add, "delete_s": t_del}
+
+
+def ui(rep, conn, cfg):
+    if not cfg.ipc or not shutil.which(cfg.ipc[0]):
+        rep.add("ui", False, skip=f"UI IPC command {cfg.ipc} not found (set SUPERSPACE_IPC)")
+        return
+
+    def ipc(fn, *args):
+        return subprocess.run(cfg.ipc + [fn, *args], capture_output=True, text=True, timeout=5).stdout.strip()
+
+    def state():
+        out = ipc("state")
+        try:
+            return json.loads(out)
+        except ValueError:
+            raise RuntimeError(f"state() did not return JSON: {out[:200]!r}")
+
+    def open_and_wait(q, top=None):
+        ipc("open", q)
+        t0 = now()
+        while now() - t0 < 3:
+            s = state()
+            if s.get("open") and s.get("query") == q and s.get("phase", "final") == "final" and s.get("rows") and (top is None or s["rows"][0].get("key") == top):
+                return s, (now() - t0) * 1000
+            time.sleep(0.05)
+        return state(), None
+
+    def step(name, ok, why):
+        rep.add(f"ui:{name}", ok, why)
+    try:
+        s, ms = open_and_wait("apartment lease bond", LEASE)
+        step("open", ms is not None, f"open('apartment lease bond') did not show {LEASE} first within 3 s; state: {json.dumps(s)[:300]}")
+        rep.data["ui_open_ms"] = ms
+        step("selected-starts-at-0", s.get("selected") == 0, f"selected is {s.get('selected')} after open, want 0")
+        last, sel = len(s.get("rows", [])) - 1, 0
+        for key, move in (("Down", 1), ("ctrl+n", 1), ("Up", -1), ("ctrl+p", -1)):
+            sel = max(0, min(last, sel + move))
+            ipc("key", key)
+            got = state().get("selected")
+            step(f"key-{key}", got == sel, f"after {key} selected is {got}, want {sel} ({last + 1} rows, no wrap-around)")
+        ipc("key", "Tab")
+        step("key-Tab", state().get("expanded") is True, "Tab did not expand the selected row's hits")
+        hits = (s.get("rows") or [{}])[0].get("hits", 0)
+        if (len(hits) if isinstance(hits, list) else hits or 0) < 2:
+            rep.add("ui:key-Right-Left", False, skip=f"the top row has {hits} hits; Right/Left need 2")
+        else:
+            ipc("key", "Right")
+            h = state().get("hit")
+            ipc("key", "Left")
+            step("key-Right-Left", h == 1 and state().get("hit") == 0, f"Right/Left should step hits 0 -> 1 -> 0, got {h} then {state().get('hit')}")
+        ipc("key", "Escape")
+        step("key-Escape", state().get("open") is False, "Escape did not close the search box")
+        s, _ = open_and_wait("awkward")
+        step("emoji", (s.get("rows") or [{}])[0].get("key") == "emoji:😬", f"'awkward' top row is {(s.get('rows') or [{}])[0].get('key')}")
+        s, _ = open_and_wait("15% of 80")
+        step("answer", "12" in json.dumps(s.get("answer")), f"'15% of 80' shows answer {s.get('answer')}")
+        s, _ = open_and_wait("zxqv blorptastic")
+        local = [r for r in s.get("rows", []) if r.get("kind") != "web"]
+        step("nothing-matches", s.get("empty") is True and not local, f"a nonsense query should show only the web row with empty=true; got empty={s.get('empty')}, {len(local)} local rows")
+        theme_now(rep, s, cfg)
+        if cfg.ui_actions:
+            open_and_wait("apartment lease bond", LEASE)
+            ipc("key", "Return")
+            step("key-Return", state().get("open") is False, "Enter did not open the top row and close the box")
+        ipc("key", "Escape")
+    except Exception as e:
+        step("ipc", False, f"UI IPC failed: {e}")
+
+
+# ------------------------------------------------------------------ theme
+
+COLOR_NAMES = "white|black|red|green|blue|gray|grey|yellow|orange|purple|pink|silver|maroon|navy|teal|olive|lime|aqua|fuchsia|cyan|magenta|darkgray|lightgray|darkgrey|lightgrey"
+LINT = [
+    (r'"#[0-9a-fA-F]{3,8}"', "hard-coded colour"),
+    (r"Qt\.(rgba|rgb|hsla|hsva|hsl)\(\s*[\d.]", "colour built from literal numbers"),
+    (rf'[cC]olor\s*:\s*"({COLOR_NAMES})"', "named colour"),
+    (r'font\.family\s*:\s*"', "hard-coded font family"),
+    (r"font\.(pixelSize|pointSize)\s*:\s*\d", "hard-coded font size"),
+    (r"\bradius\s*:\s*[1-9]", "hard-coded corner radius"),
+]
+
+
+def theme_lint(rep):
+    """Every colour, font, size and radius must come from Omarchy's theme (DESIGN.md, UI)."""
+    files = sorted(p for p in [*ROOT.glob("*.qml"), *(ROOT / "ui").rglob("*.qml"), *(ROOT / "ui").rglob("*.js")] if p.is_file())
+    if not files:
+        rep.add("theme:lint", False, skip="no QML in ui/ or at the repo root yet")
+        return
+    bad = []
+    for f in files:
+        for n, line in enumerate(f.read_text(errors="ignore").splitlines(), 1):
+            if "theme-ok" in line or line.lstrip().startswith("//"):
+                continue
+            bad += [f"{f.relative_to(ROOT)}:{n}: {what}: {line.strip()[:100]}" for pat, what in LINT if re.search(pat, line)]
+    rep.add("theme:lint", not bad, f"{len(bad)} hard-coded style values (mark a justified one with // theme-ok):\n" + "\n".join(bad[:40]))
+    rep.data["theme_lint"] = {"files": [str(f.relative_to(ROOT)) for f in files], "problems": bad}
+
+
+def ui_home():
+    """The desktop session's home (where the theme lives), which can differ from the daemon's."""
+    return pathlib.Path(os.environ.get("SUPERSPACE_UI_HOME") or pathlib.Path.home())
+
+
+def theme_colors():
+    """The menu colours Omarchy's own launcher uses for the current theme."""
+    d = ui_home() / ".local/state/omarchy/current/theme"
+    read = lambda f: dict(re.findall(r'^\s*([\w-]+)\s*=\s*"(#[0-9a-fA-F]{6})', (d / f).read_text(), re.M)) if (d / f).exists() else {}
+    colors = read("colors.toml")
+    menu = {}
+    if (d / "shell.toml").exists():
+        sect = re.search(r"^\[menu\](.*?)(?=^\[|\Z)", (d / "shell.toml").read_text(), re.M | re.S)
+        menu = dict(re.findall(r'^\s*([\w-]+)\s*=\s*"(#[0-9a-fA-F]{6})', sect.group(1), re.M)) if sect else {}
+    return {"background": (menu.get("background") or colors.get("background", "")).lower(),
+            "text": (menu.get("text") or colors.get("foreground", "")).lower()}
+
+
+def theme_now(rep, s, cfg):
+    t = s.get("theme")
+    if not isinstance(t, dict):
+        rep.add("theme:current", False, skip="state() has no 'theme' object, so the bench cannot compare the UI's colours with the theme")
+        return
+    want = theme_colors()
+    got = {k: str(t.get(k) or "").lower()[:7] for k in want}
+    rep.add("theme:current", got == want, f"UI colours {got} differ from the current theme's menu colours {want}")
+
+
+def ppm(path):
+    data = path.read_bytes()
+    w, h = map(int, data.split(maxsplit=3)[1:3])
+    return w, h, data[-w * h * 3:]
+
+
+def panel_color(before, after):
+    """Most common colour among pixels that changed when the UI opened."""
+    w, h, a = ppm(before)
+    _, _, b = ppm(after)
+    counts = {}
+    for i in range(0, w * h * 3, 3 * 7):
+        if abs(a[i] - b[i]) + abs(a[i + 1] - b[i + 1]) + abs(a[i + 2] - b[i + 2]) > 30:
+            c = (b[i] >> 3 << 3, b[i + 1] >> 3 << 3, b[i + 2] >> 3 << 3)
+            counts[c] = counts.get(c, 0) + 1
+    return max(counts, key=counts.get) if counts else None
+
+
+def theme_sweep(rep, cfg, outdir):
+    """Opt-in: switch the live theme, screenshot the UI under each, then switch back."""
+    name_file = ui_home() / ".local/state/omarchy/current/theme.name"
+    original = name_file.read_text().strip() if name_file.exists() else None
+    ipc = lambda *a: subprocess.run(cfg.ipc + list(a), capture_output=True, text=True, timeout=5)
+    try:
+        for name in cfg.themes:
+            subprocess.run(["omarchy-theme-set", name], capture_output=True, timeout=60)
+            time.sleep(3)
+            before, after = outdir / f"theme-{name}-closed.ppm", outdir / f"theme-{name}-open.ppm"
+            subprocess.run(["grim", "-t", "ppm", str(before)], timeout=10)
+            ipc("open", "golden retriever")
+            time.sleep(1.5)
+            subprocess.run(["grim", "-t", "ppm", str(after)], timeout=10)
+            subprocess.run(["grim", str(outdir / f"theme-{name}.png")], timeout=10)
+            ipc("key", "Escape")
+            want = theme_colors()["background"]
+            got = panel_color(before, after)
+            wr = tuple(int(want[i:i + 2], 16) for i in (1, 3, 5)) if want else None
+            dist = sum((x - y) ** 2 for x, y in zip(got, wr)) ** 0.5 if got and wr else None
+            rep.add(f"theme:sweep:{name}", dist is not None and dist < 48,
+                    f"theme {name}: the UI panel is {got}, the theme's menu background is {want} (distance {dist}); screenshot theme-{name}.png")
+            before.unlink(missing_ok=True)
+            after.unlink(missing_ok=True)
+    finally:
+        if original:
+            subprocess.run(["omarchy-theme-set", original], capture_output=True, timeout=60)
+
+
+# ------------------------------------------------------------------ report
+
+def write_report(rep, cfg, started):
+    fails = rep.failures()
+    skips = [c for c in rep.checks if c["skip"]]
+    m = rep.data.get("metrics", {})
+    g = rep.data.get("golden", [])
+    lines = [f"# Super Space bench, {started:%Y-%m-%d %H:%M}", "",
+             f"Host {platform.node()} ({platform.machine()}), socket `{cfg.sock}`, home `{cfg.home}`.",
+             f"Daemon status: `{json.dumps(rep.data.get('status'))[:300]}`", "",
+             f"**{len(fails)} failed, {sum(c['ok'] for c in rep.checks)} passed, {len(skips)} skipped.**", "",
+             "| Section | Pass | Fail | Skip |", "|---|---|---|---|"]
+    for sec in ["golden", "rules", "budget", "prefs", "parity", "live", "ui", "theme"]:
+        cs = [c for c in rep.checks if c["check"].split(":")[0] == sec]
+        if cs:
+            lines.append(f"| {sec} | {sum(c['ok'] for c in cs)} | {sum(not c['ok'] and not c['skip'] for c in cs)} | {sum(bool(c['skip']) for c in cs)} |")
+    if m:
+        demo = [r for r in g if "demo" in r["tags"]]
+        none = [r for r in g if "no-results" in r["tags"]]
+        lines += ["", "## Metrics", "",
+                  f"recall@1 {m['recall@1']}, recall@5 {m['recall@5']}, MRR {m['mrr']} over {m['cases_with_expected_row']} cases with an expected row (target: recall@5 >= 0.9).",
+                  f"Demo script: {sum(r['ok'] for r in demo)}/{len(demo)} correct. No-results queries empty: {sum(r['ok'] for r in none)}/{len(none)}.",
+                  "", "| Tag | Pass |", "|---|---|"]
+        for tag in sorted({t for r in g for t in r["tags"]}):
+            rs = [r for r in g if tag in r["tags"]]
+            lines.append(f"| {tag} | {sum(r['ok'] for r in rs)}/{len(rs)} |")
+    if rep.data.get("budgets"):
+        lines += ["", "## Latency (ms, measured at the socket by this client)", "", "| What | n | p50 | p95 | max | p95 budget |", "|---|---|---|---|---|---|"]
+        lines += [f"| {k} | {v['n']} | {v['p50']} | {v['p95']} | {v['max']} | {v['budget_p95']} |" for k, v in rep.data["budgets"].items()]
+    if rep.data.get("live"):
+        lines += ["", "Live index: add {}, delete {} (budget {} s).".format(*(f"{v:.2f} s" if v is not None else "timed out" for v in rep.data["live"].values()), LIVE_S)]
+    answers = [r for r in g if "answer" in r["tags"]]
+    if answers:
+        lines += ["", "## Answers", "", "| Query | Output | OK |", "|---|---|---|"]
+        lines += [f"| `{r['q']}` | {(r['answer'] or {}).get('output', '(none)')} | {'yes' if r['ok'] else 'NO: ' + r['why']} |" for r in answers]
+    lines += ["", "## Failures", ""] + ([f"- **{c['check']}**: {c['why']}" for c in fails] or ["None."])
+    lines += ["", "## Skipped", ""] + ([f"- {c['check']}: {c['skip']}" for c in skips] or ["None."])
+    out = cfg.out / f"{started:%Y%m%d-%H%M%S}"
+    out.with_suffix(".md").write_text("\n".join(lines) + "\n")
+    out.with_suffix(".json").write_text(json.dumps({"started": started.isoformat(), "host": platform.node(), "arch": platform.machine(),
+                                                    "sock": cfg.sock, "home": str(cfg.home), "checks": rep.checks, **rep.data},
+                                                   indent=1, ensure_ascii=False, default=str) + "\n")
+    return out
+
+
+def run(cfg):
+    rep = Report()
+    started = datetime.datetime.now()
+    want = cfg.only or SECTIONS
+    if "theme" in want:
+        theme_lint(rep)
+    needs_daemon = [s for s in want if s != "theme"] or (["ui"] if cfg.themes else [])
+    conn = None
+    if needs_daemon:
+        try:
+            conn = Conn(cfg.sock)
+        except OSError as e:
+            rep.add("daemon", False, f"cannot connect to {cfg.sock}: {e}")
+    if conn:
+        st = conn.call("status")
+        rep.data["status"] = st.get("value") or st.get("error")
+        if not cfg.home:
+            h = (st.get("value") or {}).get("home") if isinstance(st.get("value"), dict) else None
+            cfg.home = pathlib.Path(h or os.environ.get("SUPERSPACE_HOME") or pathlib.Path.home())
+        for name in ("golden", "budgets", "prefs", "parity", "live", "ui"):
+            if name in want:
+                try:
+                    globals()[name](rep, conn, cfg)
+                except Exception as e:
+                    rep.add(f"{name}:crash", False, f"the {name} section stopped: {type(e).__name__}: {e}")
+        if cfg.themes:
+            outdir = cfg.out / f"themes-{started:%Y%m%d-%H%M%S}"
+            outdir.mkdir(parents=True, exist_ok=True)
+            theme_sweep(rep, cfg, outdir)
+    cfg.out.mkdir(parents=True, exist_ok=True)
+    path = write_report(rep, cfg, started)
+    return rep, path
+
+
+def config(args):
+    sock = args.sock or os.environ.get("SUPERSPACE_SOCK") or os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "superspace.sock")
+    bin_ = shlex.split(os.environ.get("SUPERSPACE_BIN", "")) or (["superspace"] if shutil.which("superspace") else None)
+    ipc = shlex.split(os.environ.get("SUPERSPACE_IPC", "omarchy-shell superspace"))
+    home = args.home or os.environ.get("SUPERSPACE_HOME")
+    return argparse.Namespace(sock=sock, bin=bin_, ipc=ipc, home=pathlib.Path(home).expanduser() if home else None,
+                              only=args.only.split(",") if args.only else None, tags=args.tags.split(",") if args.tags else None,
+                              themes=args.themes.split(",") if args.themes else [], ui_actions=args.ui_actions,
+                              allow_home_writes=args.allow_home_writes, out=pathlib.Path(args.out))
+
+
+# ------------------------------------------------------------------ self-test
+
+FAULTS = {  # fault -> regex one failed check must match; "" must pass everything that runs
+    "": None,
+    "slow": r"^budget:(instant|final)",
+    "no-instant": r"^budget:typing-instant-missing|^golden:demo-idr",
+    "web-first": r"^rules:",
+    "pad": r"^golden:none-",
+    "wrong-locator": r"^golden:demo-lease$",
+    "prefs-noop": r"^prefs:pin$",
+    "parity": r"^parity:cli:",
+    "slow-index": r"^live:add$",
+    "ui-stuck": r"^ui:key-",
+}
+
+
+def golden_lint():
+    """Every file a golden case expects must exist in the built demo corpus."""
+    home = ROOT / "demo/corpus/home"
+    if not home.exists():
+        return ["demo/corpus/home is not built: run demo/build.sh"]
+    keys = {k for c in CASES for k in ([c["want"].get("key")] if isinstance(c.get("want", {}).get("key"), str) else c.get("want", {}).get("key", []))}
+    return [f"golden key {k} has no file in demo/corpus/home" for k in sorted(keys) if k.startswith("file:") and not (home / k[5:]).exists()]
+
+
+def self_test(args):
+    problems = golden_lint()
+    print(f"golden lint: {len(problems) or 'ok'}", *problems, sep="\n  ")
+    py, fake = sys.executable, str(HERE / "fake_daemon.py")
+    ok = not problems
+    for fault, expect in FAULTS.items():
+        with tempfile.TemporaryDirectory(prefix="ssbench-", dir="/tmp") as tmp:
+            tmp = pathlib.Path(tmp)
+            home = tmp / "home"
+            (home / "Documents").mkdir(parents=True)
+            (home / ".local/state/omarchy/current/theme").mkdir(parents=True)
+            (home / ".local/state/omarchy/current/theme/colors.toml").write_text('background = "#1a1b26"\nforeground = "#c0caf5"\n')
+            shutil.copy(ROOT / "demo/corpus/clipboard-history.json", home / ".local/state/omarchy/clipboard-history.json") if (ROOT / "demo/corpus/clipboard-history.json").exists() else None
+            sock = str(tmp / "s.sock")
+            env = dict(os.environ, SUPERSPACE_FAKE_FAULTS=fault, SUPERSPACE_SOCK=sock, SUPERSPACE_UI_HOME=str(home))
+            srv = subprocess.Popen([py, fake, "serve", "--sock", sock, "--home", str(home)], env=env)
+            os.environ.update(SUPERSPACE_FAKE_FAULTS=fault, SUPERSPACE_SOCK=sock, SUPERSPACE_UI_HOME=str(home))
+            try:
+                for _ in range(50):
+                    if os.path.exists(sock):
+                        break
+                    time.sleep(0.1)
+                cfg = argparse.Namespace(sock=sock, bin=[py, fake], ipc=[py, fake, "ui"], home=home, only=None,
+                                         tags=None if fault == "" else ["demo", "no-results"], themes=[], ui_actions=True,
+                                         allow_home_writes=False, out=tmp / "reports")
+                t0 = now()
+                rep, path = run(cfg)
+                fails = [c["check"] for c in rep.failures() if not c["check"].startswith("theme:lint")]
+                good = not fails if expect is None else any(re.search(expect, f) for f in fails)
+                ok &= good
+                print(f"{'ok  ' if good else 'FAIL'} fault={fault or 'none':14} {len(fails):3} failures, {now() - t0:5.1f} s"
+                      + ("" if good else f"  expected {expect or 'no failures'}; got: {fails[:8]}"))
+                if fault == "" and args.keep:
+                    shutil.copy(path.with_suffix(".md"), HERE / "reports" / "self-test.md")
+            finally:
+                srv.kill()
+    print("self-test", "passed" if ok else "FAILED")
+    return 0 if ok else 1
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--only", help="comma list of sections: " + " ".join(SECTIONS))
+    ap.add_argument("--tags", help="only golden cases with one of these tags")
+    ap.add_argument("--sock")
+    ap.add_argument("--home", help="the daemon's home, when its status does not report it")
+    ap.add_argument("--themes", help="opt-in: switch the live theme to each of these and screenshot the UI")
+    ap.add_argument("--ui-actions", action="store_true", help="also press Enter in the UI (opens a document)")
+    ap.add_argument("--allow-home-writes", action="store_true", help="let the live test write a file in your real ~/Documents")
+    ap.add_argument("--out", default=str(HERE / "reports"))
+    ap.add_argument("--self-test", action="store_true")
+    ap.add_argument("--keep", action="store_true", help="with --self-test: keep the clean run's report as tests/reports/self-test.md")
+    args = ap.parse_args()
+    if args.self_test:
+        (HERE / "reports").mkdir(exist_ok=True)
+        sys.exit(self_test(args))
+    rep, path = run(config(args))
+    fails = rep.failures()
+    for c in fails:
+        print(f"FAIL {c['check']}: {c['why']}")
+    m = rep.data.get("metrics") or {}
+    print(f"{len(fails)} failed, {sum(c['ok'] for c in rep.checks)} passed, {sum(bool(c['skip']) for c in rep.checks)} skipped;"
+          f" recall@1 {m.get('recall@1')} recall@5 {m.get('recall@5')} MRR {m.get('mrr')}")
+    print(f"report: {path}.md")
+    sys.exit(1 if fails else 0)
+
+
+if __name__ == "__main__":
+    main()
