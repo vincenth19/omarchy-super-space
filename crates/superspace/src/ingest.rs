@@ -3,14 +3,15 @@
 //! all text), the embedder, and a file watcher that settles for 300 ms before
 //! handing over what changed.
 
+use crate::Cfg;
 use crate::embed::{self, Fail, Input, quantize};
 use crate::server::Daemon;
-use crate::store::{Pending, fnv};
+use crate::store::{Pending, fnv, prio, record};
 use notify::Watcher;
-use ss_core::{Doc, Kind};
+use ss_core::{Doc, Embed, Kind};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::time::{Duration, Instant, UNIX_EPOCH};
@@ -83,7 +84,7 @@ pub fn file_key(home: &Path, p: &Path) -> String {
     format!("file:{}", p.strip_prefix(home).unwrap_or(p).display())
 }
 
-/// "mtime:size": an unchanged file is never read again.
+/// "mtime:size": an unchanged file is never read again (stored with ss-files' version, see `files_version`).
 fn file_stamp(p: &Path) -> Option<(String, i64)> {
     let m = std::fs::symlink_metadata(p).ok().filter(|m| m.is_file())?;
     let mtime = m.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
@@ -179,6 +180,22 @@ pub fn source_stamp(doc: &Doc) -> String {
     format!("{}~{:x}", doc.stamp, fnv(&[&doc.title, &doc.subtitle, &doc.icon, &meta, &parts]))
 }
 
+/// A Doc stamp's version: what comes before its first "-" (ss-files' "x3-…").
+fn version(stamp: &str) -> &str {
+    stamp.split('-').next().unwrap_or_default()
+}
+
+/// ss-files' extraction version, from a probe file. Each file's stored stamp
+/// ends with its Doc's version, so a new extraction reads every file again.
+fn files_version(d: &Daemon) -> &'static str {
+    static V: OnceLock<String> = OnceLock::new();
+    V.get_or_init(|| {
+        let probe = d.cfg.cache.join("probe.txt");
+        let _ = std::fs::create_dir_all(&d.cfg.cache).and_then(|_| std::fs::write(&probe, "probe"));
+        ext::file_doc(&probe, &d.cfg.home).map_or_else(String::new, |doc| version(&doc.stamp).to_string())
+    })
+}
+
 /// Index one file if it changed. Media goes to the slow queue; a new one is
 /// findable by name at once through its quick Doc (no parts).
 fn index_file(d: &Daemon, p: &Path, known: Option<&String>, batch: &mut Vec<(Doc, String, i64)>) {
@@ -196,9 +213,10 @@ fn index_file(d: &Daemon, p: &Path, known: Option<&String>, batch: &mut Vec<(Doc
         }
         d.media.lock().unwrap().insert(p.to_path_buf());
         d.media_cv.notify_all();
-    } else if known != Some(&stamp)
+    } else if known != Some(&format!("{stamp}~{}", files_version(d)))
         && let Some(doc) = ext::file_doc(p, &d.cfg.home)
     {
+        let stamp = format!("{stamp}~{}", version(&doc.stamp));
         batch.push((Doc { key, ..doc }, stamp, mtime));
     }
 }
@@ -242,7 +260,27 @@ fn forget(d: &Daemon, keys: &[String], prefixes: &[String]) {
     }
 }
 
+/// Files the user uses: picked in Super Space, or in GTK's recently used list.
+fn used(d: &Daemon) -> HashSet<String> {
+    let xbel = std::fs::read_to_string(d.cfg.home.join(".local/share/recently-used.xbel")).unwrap_or_default();
+    let recent = xbel.split("href=\"file://").skip(1).filter_map(|s| s.split('"').next()).map(|u| file_key(&d.cfg.home, Path::new(&unescape(u))));
+    d.picks.read().unwrap().iter().map(|p| p.key.clone()).chain(recent).collect()
+}
+
+/// A file URI's path, without its %XX escapes and XML's &amp;.
+fn unescape(uri: &str) -> String {
+    let b = uri.replace("&amp;", "&").into_bytes();
+    let (mut out, mut i) = (Vec::new(), 0);
+    while i < b.len() {
+        let hex = b.get(i + 1..i + 3).filter(|_| b[i] == b'%').and_then(|h| u8::from_str_radix(std::str::from_utf8(h).ok()?, 16).ok());
+        out.push(hex.unwrap_or(b[i]));
+        i += if hex.is_some() { 3 } else { 1 };
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 fn rescan(d: &Daemon) {
+    *d.store.used.write().unwrap() = used(d);
     let Ok(known) = d.store.stamps(None) else { return };
     let files = ext::crawl(&d.cfg.home);
     index_all(d, &files, &known);
@@ -315,38 +353,45 @@ fn sync_paths(d: &Daemon, paths: BTreeSet<PathBuf>) {
     }
 }
 
+/// The media file to read next, with its priority: photos, then songs, then videos, newest first.
+pub fn next_media(d: &Daemon) -> Option<(PathBuf, i64)> {
+    let q = d.media.lock().unwrap();
+    let mem = d.store.mem.read().unwrap();
+    let rank = |p: &PathBuf| {
+        let it = mem.keys.get(&file_key(&d.cfg.home, p)).map(|id| &mem.items[id]);
+        prio(it.map_or(Kind::Video, |it| it.kind), false, false, false, it.map_or(0, |it| it.mtime))
+    };
+    q.iter().map(|p| (p, rank(p))).min_by_key(|x| x.1).map(|(p, n)| (p.clone(), n))
+}
+
 /// Photos, videos and audio, one at a time, once nothing waits for the model.
 /// The heavy lock keeps ffmpeg/whisper and picture embedding from running at
-/// the same time: on a Pi they slow each other down 2-8x.
+/// the same time: on a Pi they slow each other down 2-8x. A file stays queued
+/// while it is read (progress counts it), and is read again if it changed meanwhile.
 fn media_loop(d: Arc<Daemon>) {
     loop {
-        let p = {
-            let mut q = d.media.lock().unwrap();
-            loop {
-                if let Some(p) = q.pop_first() {
-                    break p;
-                }
-                q = d.media_cv.wait(q).unwrap();
-            }
-        };
-        while d.busy.load(Ordering::SeqCst) > 0 || d.store.counts().0 > 0 {
+        drop(d.media_cv.wait_while(d.media.lock().unwrap(), |q| q.is_empty()).unwrap());
+        while d.busy.load(Ordering::SeqCst) > 0 || d.store.queue().0 > 0 {
             std::thread::sleep(Duration::from_millis(250));
         }
+        let Some((p, _)) = next_media(&d) else { continue };
         let key = file_key(&d.cfg.home, &p);
-        let Some(stamp) = ext::media_stamp(&p, &d.cfg.home) else { continue };
-        if d.store.stamp(&key).as_ref() == Some(&stamp) {
-            continue;
-        }
-        let doc = {
-            let _heavy = d.heavy.lock().unwrap();
-            ext::media_doc(&p, &d.cfg.home, &d.cfg.cache)
-        };
-        if let Some(doc) = doc {
-            let (stamp, mtime) = (doc.stamp.clone(), file_stamp(&p).map_or(0, |s| s.1));
-            if let Err(e) = d.store.put(vec![(Doc { key, icon: media_icon(&p, &doc.icon), ..doc }, stamp, mtime)]) {
-                eprintln!("superspace: indexing {}: {e:#}", p.display());
+        let stamp = ext::media_stamp(&p, &d.cfg.home);
+        if stamp.is_some() && d.store.stamp(&key) != stamp {
+            let doc = {
+                let _heavy = d.heavy.lock().unwrap();
+                ext::media_doc(&p, &d.cfg.home, &d.cfg.cache)
+            };
+            if let Some(doc) = doc {
+                let (stamp, mtime) = (doc.stamp.clone(), file_stamp(&p).map_or(0, |s| s.1));
+                if let Err(e) = d.store.put(vec![(Doc { key, icon: media_icon(&p, &doc.icon), ..doc }, stamp, mtime)]) {
+                    eprintln!("superspace: indexing {}: {e:#}", p.display());
+                }
+                d.wake_embedder();
             }
-            d.wake_embedder();
+        }
+        if ext::media_stamp(&p, &d.cfg.home) == stamp {
+            d.media.lock().unwrap().remove(&p);
         }
     }
 }
@@ -426,6 +471,34 @@ fn embed_loop(d: Arc<Daemon>) {
             wait(10);
         }
     }
+}
+
+/// `superspace precompute OUT`: every app, setting and emoji text on this
+/// machine, embedded through the index server, as a ready-made vector file
+/// (compiled in from crates/superspace/data/vectors.bin; see `store::lookup`).
+pub fn precompute(cfg: &Cfg, out: &Path) -> anyhow::Result<()> {
+    let parts = [ext::apps(), ext::settings(), ext::emoji()].into_iter().flatten().flat_map(|d| d.parts);
+    let mut texts: Vec<String> = parts.filter_map(|p| if let Embed::Text(t) = p.embed { Some(t) } else { None }).collect();
+    texts.sort();
+    texts.dedup();
+    write_ready(&cfg.index_url, &texts, out)
+}
+
+pub fn write_ready(url: &str, texts: &[String], out: &Path) -> anyhow::Result<()> {
+    let mut recs = Vec::new();
+    for batch in texts.chunks(16) {
+        let inputs: Vec<Input> = batch.iter().map(|t| Input::Text(t)).collect();
+        match embed::embed(url, &inputs, Duration::from_secs(300)) {
+            Ok(vecs) => recs.extend(batch.iter().zip(vecs).map(|(t, v)| record(t, &v))),
+            Err(Fail::Refused(e)) => eprintln!("superspace: skipped {} texts: {e}", batch.len()),
+            Err(Fail::Down(e)) => anyhow::bail!("index server {url}: {e}"),
+        }
+        eprint!("\rsuperspace: {}/{} embedded", recs.len(), texts.len());
+    }
+    recs.sort_by_key(|r| r.0);
+    std::fs::write(out, recs.iter().flat_map(|r| &r.1).copied().collect::<Vec<u8>>())?;
+    eprintln!("\nsuperspace: wrote {} vectors to {}", recs.len(), out.display());
+    Ok(())
 }
 
 fn input(p: &Pending) -> Input<'_> {

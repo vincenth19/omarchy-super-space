@@ -95,7 +95,7 @@ pub mod ext {
             subtitle: "~/Documents".into(),
             icon: "text-x-generic".into(),
             action: Action::Open { path: p.display().to_string(), locator: Locator::default() },
-            stamp: String::new(),
+            stamp: "f1-x".into(),
             names: Vec::new(),
             parts: vec![Part { embed: Embed::Text(doc_text(&name, &text)), text, locator: Locator { line: Some(1), ..Locator::default() } }],
         })
@@ -442,6 +442,7 @@ fn socket_sends_two_phases_and_skips_superseded_finals() {
     assert_eq!(phases, [(1, "instant".to_string()), (1, "final".to_string())]);
     assert_eq!(got[0]["empty"], true);
     assert_eq!(got[1]["rows"][0]["key"], "file:Documents/puppy.txt");
+    assert!(got[1].get("progress").is_none(), "no progress once everything is embedded");
     assert!(got[1]["timing"]["embed_ms"].as_f64().unwrap() >= 250.0);
     for (id, q) in [(2, "alpha"), (3, "alphab"), (4, "alphabet")] {
         writeln!(s, r#"{{"op":"search","id":{id},"q":"{q}"}}"#).unwrap();
@@ -469,6 +470,7 @@ fn watcher_indexes_and_forgets_files_within_2s() {
     let key = "file:Documents/new/zebra.txt";
     let has = |t: &T| search::search(&t.d, "zebra crossing", 30, None, None).0.iter().any(|r| r.key == key);
     let added = until("new file", Duration::from_secs(2), || has(&t));
+    assert!(t.d.store.stamp(key).unwrap().ends_with("~f1"), "the stamp holds the Doc's version: a new extraction reads it again");
     std::fs::write(&f, "now about giraffes").unwrap();
     let changed = until("changed file", Duration::from_secs(2), || !has(&t));
     std::fs::remove_dir_all(f.parent().unwrap()).unwrap();
@@ -760,4 +762,67 @@ fn hits_put_named_and_keyword_parts_first_and_keep_lyric_lines() {
     assert!(matches!(&r.action, Action::Open { locator, .. } if locator.sheet.as_deref() == Some("Toowong")));
     let r = row("spare key light", "file:Music/keys.mp3");
     assert_eq!(r.hits.iter().map(|h| h.locator.t).collect::<Vec<_>>(), [Some(2.0)], "the lyric line, though the whole lyrics matched by meaning");
+}
+
+#[test]
+fn embedding_order_follows_use_and_age_and_progress_says_so() {
+    let xbel = r#"<bookmark href="file:///HOME/Documents/used%20one.txt" added="x"><bookmark href="file:///elsewhere/x.txt">"#;
+    let t = start_with(0, "", Some("http://127.0.0.1:9/v1/embeddings"), |home| {
+        std::fs::create_dir_all(home.join(".local/share")).unwrap();
+        std::fs::write(home.join(".local/share/recently-used.xbel"), xbel.replace("/HOME", &home.display().to_string())).unwrap();
+    });
+    assert!(t.d.store.used.read().unwrap().contains("file:Documents/used one.txt"), "GTK's recently used files count as used");
+    let one = |key: &str, kind: Kind, body: &str| doc(key, kind, body, body, &[]);
+    let two = |key: &str, a: &str, b: &str| Doc { parts: [a, b].map(|x| one(key, Kind::File, x).parts.remove(0)).to_vec(), ..one(key, Kind::File, a) };
+    let photo = |key: &str| {
+        let part = Part { text: String::new(), locator: Locator::default(), embed: Embed::Image(t.dir.join(key)) };
+        Doc { parts: vec![part], ..one(key, Kind::Image, key) }
+    };
+    let docs = vec![
+        (one("emoji:x", Kind::Emoji, "emoji"), 0), (one("history:x", Kind::History, "history"), 0), (photo("file:Pictures/a.jpg"), 9),
+        (two("file:Documents/old.txt", "old gist", "old deep"), 100), (two("file:Documents/new.txt", "new gist", "new deep"), 200),
+        (two("file:Documents/used one.txt", "used gist", "used deep"), 50), (one("clip:x", Kind::Clip, "clip"), 0),
+        (one("setting:x", Kind::Setting, "setting"), 0), (one("app:x", Kind::App, "app"), 0),
+    ];
+    t.d.store.put(docs.into_iter().map(|(d, m)| (d, "1".into(), m)).collect()).unwrap();
+    let order: Vec<String> = t.d.store.pending(50).unwrap().into_iter().map(|p| p.text.split(": ").last().unwrap().to_string()).collect();
+    assert_eq!(order, ["app", "setting", "used gist", "new gist", "old gist", "used deep", "clip", "new deep", "old deep", "history", "emoji", ""]);
+    // Media not read yet: photos newest first, then songs, then videos.
+    for (key, kind, mtime) in [("file:Documents/v.mp4", Kind::Video, 300), ("file:Documents/s.mp3", Kind::Audio, 300), ("file:Documents/p1.jpg", Kind::Image, 100), ("file:Documents/p2.jpg", Kind::Image, 200)] {
+        t.d.store.put(vec![(Doc { parts: Vec::new(), ..one(key, kind, key) }, "quick".into(), mtime)]).unwrap();
+        t.d.media.lock().unwrap().insert(t.dir.join("home").join(&key[5..]));
+    }
+    assert_eq!(ingest::next_media(&t.d).unwrap().0, t.dir.join("home/Documents/p2.jpg"));
+    let v = serde_json::to_value(t.d.handle(serde_json::from_value(json!({"op": "search", "id": 1, "q": "app"})).unwrap())).unwrap();
+    assert_eq!(v["progress"], json!({"done": 0, "total": 16, "stage": "apps and settings"}));
+    assert_eq!(t.req(json!({"op": "status", "id": 1}))["progress"]["total"], 16);
+}
+
+#[test]
+fn ready_made_vectors_are_found_by_their_exact_input() {
+    let url = fake_embedder(Duration::ZERO, Arc::new(AtomicUsize::new(0)));
+    let file = std::env::temp_dir().join(format!("ss-ready-{}.bin", std::process::id()));
+    let texts: Vec<String> = ["title: Dog | text: pet", "title: Cat | text: pet", "title: Wi-Fi | text: connect"].map(String::from).to_vec();
+    ingest::write_ready(&url, &texts, &file).unwrap();
+    let data = std::fs::read(&file).unwrap();
+    let _ = std::fs::remove_file(&file);
+    assert_eq!(data.len(), 3 * (12 + crate::embed::DIM));
+    for t in &texts {
+        let ((v, s), (got, scale)) = (crate::embed::quantize(&fake_vec(t)), crate::store::lookup(&data, t).unwrap());
+        assert!(got == v.iter().map(|&x| x as u8).collect::<Vec<_>>() && (scale - s).abs() < 1e-6, "{t}");
+    }
+    assert_eq!(crate::store::lookup(&data, "title: Dog | text: pets"), None);
+    assert_eq!(crate::store::lookup(&[], "title: Dog | text: pet"), None, "an empty file has none");
+}
+
+#[test]
+fn at_most_three_emoji_unless_they_are_all_or_asked_for() {
+    let t = start(0, "");
+    let mut docs: Vec<Doc> = (0..5).map(|i| doc(&format!("emoji:{i}"), Kind::Emoji, &format!("Dog {i}"), "dog woof", &[])).collect();
+    docs.push(doc("file:Documents/dog.txt", Kind::File, "dog.txt", "walking the dog", &[]));
+    t.put(docs);
+    let emoji = |q: &str| t.search(q).0.iter().filter(|r| r.kind == Kind::Emoji).count();
+    assert_eq!(emoji("dog"), 3);
+    assert_eq!(emoji("woof"), 5, "emoji are the only matches");
+    assert_eq!(emoji("emoji dog"), 5, "the query asks for emoji");
 }

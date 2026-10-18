@@ -503,6 +503,15 @@ pub fn search(d: &Daemon, q: &str, limit: usize, qv: Option<&QVecs>, kinds: Opti
         v
     };
     ranked.retain(|x| wanted(&x.0));
+    // At most 3 emoji, unless they are all there is or the query asks for them.
+    let emoji = |id: &i64| mem.items[id].kind == Kind::Emoji;
+    if !norm(q).starts_with("emoji") && ranked.iter().any(|x| !emoji(&x.0)) {
+        let mut n = 0;
+        ranked.retain(|x| {
+            n += usize::from(emoji(&x.0));
+            !emoji(&x.0) || n <= 3
+        });
+    }
     ranked.truncate(limit.max(1) - usize::from(web));
     let mut rows = rows(d, &mem, &ranked, q);
     let empty = rows.is_empty();

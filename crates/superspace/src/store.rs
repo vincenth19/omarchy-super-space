@@ -3,18 +3,18 @@
 //! part vectors. Vectors are int8 with one scale per row (768 bytes a part,
 //! 38 MB for 50k parts) so the daemon stays under its 150 MB budget.
 
-use crate::embed::DIM;
+use crate::embed::{DIM, quantize};
 use crate::search::QVec;
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};
 use ss_core::{Action, Doc, Embed, Kind, Locator, Part};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, RwLock};
 use std::time::Duration;
 
 /// Bump to read every file and source again (vectors are kept for unchanged text).
-const INDEX_VERSION: &str = "1";
+const INDEX_VERSION: &str = "2";
 /// Bump when the model or vector format changes: the index starts over.
 const MODEL: &str = "embeddinggemma-2-q8:768:i8";
 
@@ -162,6 +162,8 @@ pub struct Store {
     db: Mutex<Connection>,
     readers: Mutex<Vec<Connection>>,
     pub mem: RwLock<Mem>,
+    /// Keys of the files the user uses: their parts are embedded before other files'.
+    pub used: RwLock<HashSet<String>>,
 }
 
 pub fn kind_name(k: Kind) -> String {
@@ -183,20 +185,56 @@ pub fn fnv(parts: &[&str]) -> u64 {
     h
 }
 
-/// Embedding order: what people look for most is embedded first, pictures last.
-fn prio(kind: Kind, image: bool) -> i64 {
-    match kind {
-        _ if image => 5,
-        Kind::App | Kind::Setting => 0,
-        Kind::Clip | Kind::History => 1,
-        Kind::File => 2,
-        Kind::Emoji => 3,
-        _ => 4,
-    }
+/// Embedding order, by stage: apps, settings, every document's first part (its
+/// overview; the user's documents first), the rest of the user's documents,
+/// clips, the rest of the other documents, history, emoji, then photos (and
+/// other pictures), songs, videos. Newest-modified first within a stage.
+pub fn prio(kind: Kind, image: bool, first: bool, used: bool, mtime: i64) -> i64 {
+    let stage = match kind {
+        Kind::App => 0,
+        Kind::Setting => 1,
+        Kind::File if first => 2 + i64::from(!used),
+        Kind::File if used => 4,
+        Kind::Clip if !image => 5,
+        Kind::File => 6,
+        Kind::History => 7,
+        Kind::Emoji => 8,
+        Kind::Audio => 10,
+        Kind::Video => 11,
+        _ => 9,
+    };
+    const AGE: i64 = (1 << 40) - 1;
+    stage << 40 | (AGE - mtime.clamp(0, AGE))
 }
 
+/// What each stage of `prio` is called in `Progress`.
+pub const STAGES: [&str; 12] = ["apps and settings", "apps and settings", "documents (gist)", "documents (gist)", "documents",
+    "clipboard", "documents", "history", "emoji", "photos", "songs", "videos"];
+
 /// Parts below this priority are "text": media waits until none are pending.
-pub const TEXT_PRIO: i64 = 4;
+pub const TEXT_PRIO: i64 = 9 << 40;
+
+/// Vectors made ahead of time by `superspace precompute` (data/vectors.bin, compiled in;
+/// may be empty): records of fnv(MODEL, input) as u64 LE, the scale as f32 LE and DIM
+/// int8s, sorted by hash.
+#[cfg(not(test))]
+static READY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/vectors.bin"));
+#[cfg(test)]
+static READY: &[u8] = &[];
+const REC: usize = 12 + DIM;
+
+/// The ready-made vector (int8 bytes, scale) for this exact model input, if `data` has one.
+pub fn lookup(data: &[u8], input: &str) -> Option<(Vec<u8>, f32)> {
+    let recs = data.as_chunks::<REC>().0;
+    let r = &recs[recs.binary_search_by_key(&fnv(&[MODEL, input]), |r| u64::from_le_bytes(r[..8].try_into().unwrap())).ok()?];
+    Some((r[12..].to_vec(), f32::from_le_bytes(r[8..12].try_into().unwrap())))
+}
+
+/// One record of a ready-made vector file, with its sort key.
+pub fn record(input: &str, v: &[f32]) -> (u64, Vec<u8>) {
+    let ((q, s), h) = (quantize(v), fnv(&[MODEL, input]));
+    (h, [&h.to_le_bytes()[..], &s.to_le_bytes(), &u8s(&q)].concat())
+}
 
 pub fn now() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
@@ -239,7 +277,7 @@ impl Store {
         }
         db.execute("insert or replace into meta values ('model', ?1), ('version', ?2)", [MODEL, INDEX_VERSION])?;
         let mem = load(&db)?;
-        Ok(Store { path: path.to_path_buf(), db: Mutex::new(db), readers: Mutex::new(Vec::new()), mem: RwLock::new(mem) })
+        Ok(Store { path: path.to_path_buf(), db: Mutex::new(db), readers: Mutex::new(Vec::new()), mem: RwLock::new(mem), used: Default::default() })
     }
 
     /// Run `f` on a pooled read connection (many searches read at once).
@@ -255,7 +293,8 @@ impl Store {
     }
 
     /// Add or replace items, keyed by `Doc::key`, with their stamp and file mtime.
-    /// A part whose model input did not change keeps its vector (or its refusal).
+    /// A part whose model input did not change keeps its vector (or its refusal);
+    /// a new input takes a ready-made vector when there is one.
     pub fn put(&self, docs: Vec<(Doc, String, i64)>) -> Result<()> {
         let mut seen = std::collections::HashSet::new();
         let docs: Vec<_> = docs.into_iter().rev().filter(|d| seen.insert(d.0.key.clone())).collect();
@@ -292,7 +331,7 @@ impl Store {
             } else {
                 doc.parts
             };
-            let mut metas = Vec::new();
+            let (mut metas, mut first, used) = (Vec::new(), true, self.used.read().unwrap().contains(&doc.key));
             for p in parts {
                 let (input, image) = match p.embed {
                     Embed::None => (None, None),
@@ -300,11 +339,12 @@ impl Store {
                     Embed::Image(path) => (Some(String::new()), Some(path.to_string_lossy().into_owned())),
                 };
                 let ihash = fnv(&[input.as_deref().unwrap_or(""), image.as_deref().unwrap_or("")]) as i64;
-                let kept = input.as_ref().and_then(|_| reuse.get(&ihash));
+                let kept = input.as_ref().and_then(|t| reuse.get(&ihash).cloned().or_else(|| image.is_none().then(|| lookup(READY, t))?));
+                let prio = prio(doc.kind, image.is_some(), input.is_some() && std::mem::take(&mut first), used, mtime);
                 tx.execute(
                     "insert into parts (item, locator, image, input, prio, ihash, vec, scale) values (?1,?2,?3,?4,?5,?6,?7,?8)",
                     params![id, serde_json::to_string(&p.locator)?, image, if kept.is_some() { None } else { input },
-                        prio(doc.kind, image.is_some()), ihash, kept.map(|k| &k.0), kept.map(|k| k.1)],
+                        prio, ihash, kept.as_ref().map(|k| &k.0), kept.as_ref().map(|k| k.1)],
                 )?;
                 let pid = tx.last_insert_rowid();
                 tx.execute("insert into fts (rowid, title, text) values (?1, ?2, ?3)", params![pid, fts_title, p.text])?;
@@ -374,6 +414,13 @@ impl Store {
         let mut st = db.prepare_cached("select id, input, image from parts where input is not null order by prio, id limit ?1")?;
         let rows = st.query_map([n as i64], |r| Ok(Pending { id: r.get(0)?, text: r.get(1)?, image: r.get(2)? }))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// How many parts wait for the model, and the priority of the most wanted
+    /// (on a reader connection, so a search never waits for indexing).
+    pub fn queue(&self) -> (usize, Option<i64>) {
+        let sql = "select count(*), min(prio) from parts where input is not null";
+        self.read(|c| c.query_row(sql, [], |r| Ok((r.get::<_, i64>(0)? as usize, r.get(1)?)))).unwrap_or((0, None))
     }
 
     /// (pending, pending text, refused) part counts.

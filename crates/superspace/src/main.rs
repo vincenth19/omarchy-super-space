@@ -1,7 +1,7 @@
 //! superspace: the daemon, CLI and MCP server in one binary. See DESIGN.md.
 //!
 //! superspace serve | search "q" [--json] [--kind k1,k2] [--limit N] | read KEY [--part N] [--json]
-//! | similar KEY | explain "q" KEY | open KEY ["q"] | pref <op> … | prefs | status | mcp | bench [PARTS]
+//! | similar KEY | explain "q" KEY | open KEY ["q"] | pref <op> … | prefs | status | mcp | bench [PARTS] | precompute OUT
 
 mod bench;
 mod client;
@@ -60,6 +60,7 @@ fn main() {
         Some("serve") => server::serve(cfg),
         Some("mcp") => client::mcp(&cfg),
         Some("bench") => bench::run(&cfg, args.get(1).and_then(|n| n.parse().ok()).unwrap_or(50_000)).map(|_| ()),
+        Some("precompute") if args.len() == 2 => ingest::precompute(&cfg, std::path::Path::new(&args[1])),
         Some(_) => client::cli(&cfg, &args),
         None => Err(anyhow::anyhow!("usage: {}", USAGE)),
     };
@@ -70,4 +71,5 @@ fn main() {
 }
 
 pub const USAGE: &str = "superspace serve | search \"q\" [--json] [--kind k1,k2] [--limit N] | read KEY [--part N] [--json] \
-| similar KEY | explain \"q\" KEY | open KEY [\"q\"] | pref <pin|unpin|boost|bury|exclude|prefer|un…> … | prefs | status | mcp";
+| similar KEY | explain \"q\" KEY | open KEY [\"q\"] | pref <pin|unpin|boost|bury|exclude|prefer|un…> … | prefs | status | mcp \
+| precompute OUT";

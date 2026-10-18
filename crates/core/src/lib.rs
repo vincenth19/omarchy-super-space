@@ -202,6 +202,16 @@ pub struct Timing {
     pub wait_ms: f32,
 }
 
+/// How far embedding has got, while anything waits for the model.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Progress {
+    pub done: u32,
+    pub total: u32,
+    /// What is embedded now: "apps and settings", "documents (gist)", "documents",
+    /// "clipboard", "history", "emoji", "photos", "songs", "videos".
+    pub stage: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Response {
@@ -214,6 +224,9 @@ pub enum Response {
         /// True when nothing local is a real match (only the web row is left).
         empty: bool,
         timing: Timing,
+        /// Present only while embeddings are pending (meaning search is not complete yet).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        progress: Option<Progress>,
     },
     Value { id: u64, value: serde_json::Value },
     Error { id: u64, error: String },

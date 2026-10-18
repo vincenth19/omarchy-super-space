@@ -6,10 +6,10 @@ use crate::embed::{self, Input, normalize, quantize};
 use crate::ingest::{self, FastQ};
 use crate::prefs::{self, Prefs};
 use crate::search::{self, GENERIC, NF, PHOTO, QVec, QVecs, norm};
-use crate::store::{Pick, Store, kind_name, now};
+use crate::store::{Pick, STAGES, Store, kind_name, now};
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
-use ss_core::{Action, Kind, Locator, Phase, Request, Response, Timing};
+use ss_core::{Action, Kind, Locator, Phase, Progress, Request, Response, Timing};
 use std::collections::{BTreeSet, HashMap};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -46,6 +46,8 @@ pub struct Daemon {
     pub watcher: Mutex<Option<notify::RecommendedWatcher>>,
     /// The default browser's desktop id, for the web row's icon.
     pub browser: RwLock<Option<String>>,
+    /// `Store::queue` at most once a second for progress: with 50k parts pending it takes ~4.5 ms on a Pi.
+    queued: Mutex<(Option<Instant>, usize, Option<i64>)>,
 }
 
 /// A search as the connection received it.
@@ -93,6 +95,7 @@ impl Daemon {
             embed_cv: (Mutex::new(()), Condvar::new()),
             watcher: Mutex::new(None),
             browser: RwLock::new(None),
+            queued: Mutex::new((None, 0, None)),
             cfg,
         });
         d.set_prefs(prefs);
@@ -155,7 +158,25 @@ impl Daemon {
         let answer = ss_answers::answer(&s.q, self.rates.read().unwrap().as_ref(), now(), &self.tz);
         let total_ms = s.t0.elapsed().as_secs_f32() * 1000.0;
         let instant_ms = if phase == Phase::Instant { total_ms } else { instant_ms };
-        Response::Search { id: s.id, phase, rows, answer, empty, timing: Timing { instant_ms, embed_ms, total_ms, wait_ms } }
+        let timing = Timing { instant_ms, embed_ms, total_ms, wait_ms };
+        Response::Search { id: s.id, phase, rows, answer, empty, timing, progress: self.progress() }
+    }
+
+    /// Parts embedded out of all known (media not read yet counts one each), and
+    /// what is embedded now; None once nothing waits for the model.
+    pub fn progress(&self) -> Option<Progress> {
+        let (pending, first) = {
+            let mut q = self.queued.lock().unwrap();
+            if q.0.is_none_or(|t| t.elapsed() > Duration::from_secs(1)) {
+                let (n, first) = self.store.queue();
+                *q = (Some(Instant::now()), n, first);
+            }
+            (q.1, q.2)
+        };
+        let next = first.or_else(|| ingest::next_media(self).map(|m| m.1))?;
+        let done = self.store.mem.read().unwrap().rows.len();
+        let total = done + pending + self.media.lock().unwrap().len();
+        Some(Progress { done: done as u32, total: total as u32, stage: STAGES[(next >> 40) as usize].into() })
     }
 
     /// Every request except the two phases of a search on a connection.
@@ -244,6 +265,8 @@ impl Daemon {
 
     pub fn status(&self) -> Value {
         let (pending, pending_text, refused) = self.store.counts();
+        // Before the index lock: progress and the media queue take the queue's lock first.
+        let (progress, media_queue) = (self.progress(), self.media.lock().unwrap().len());
         let mem = self.store.mem.read().unwrap();
         let mut kinds: HashMap<String, usize> = HashMap::new();
         for it in mem.items.values() {
@@ -257,7 +280,7 @@ impl Daemon {
             "version": env!("CARGO_PKG_VERSION"),
             "items": mem.items.len(), "parts": mem.parts.len(), "vectors": mem.rows.len(),
             "pending": pending, "pending_text": pending_text, "refused": refused, "kinds": kinds,
-            "indexing": self.busy.load(Ordering::Relaxed) > 0, "media_queue": self.media.lock().unwrap().len(),
+            "indexing": self.busy.load(Ordering::Relaxed) > 0, "media_queue": media_queue, "progress": progress,
             "query_server": embed::healthy(&self.cfg.query_url), "index_server": embed::healthy(&self.cfg.index_url),
             "rss_mb": rss_mb, "prefs_error": *self.prefs_error.lock().unwrap(),
             "home": self.cfg.home, "state": self.cfg.state, "socket": self.cfg.sock, "preferences": self.cfg.prefs(),
