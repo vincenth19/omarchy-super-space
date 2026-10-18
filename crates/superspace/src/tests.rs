@@ -12,26 +12,75 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-/// Stand-ins for the other crates (still stubs while they are being built).
+/// Stand-ins for the other crates: text files are documents, .jpg and .mp3
+/// are media whose slow Doc takes 200 ms (a song's words come from its .lrc).
 pub mod ext {
     use ss_core::*;
     use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+    use crate::ingest::file_key;
+    /// Every path `forget` was called with.
+    pub static FORGOT: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
     pub fn roots(home: &Path) -> Vec<PathBuf> {
         vec![home.join("Documents")]
     }
-    pub fn wanted(p: &Path) -> bool {
-        p.exists() && !p.components().any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
+    pub fn wanted_in(p: &Path, _home: &Path) -> bool {
+        p.exists() && !p.components().any(|c| c.as_os_str().to_string_lossy().starts_with('.') || c.as_os_str() == "node_modules")
     }
-    pub fn crawl(home: &Path) -> Vec<PathBuf> {
-        fn walk(d: &Path, out: &mut Vec<PathBuf>) {
-            for e in std::fs::read_dir(d).into_iter().flatten().flatten() {
-                let p = e.path();
-                if p.is_dir() { walk(&p, out) } else if wanted(&p) { out.push(p) }
+    pub fn crawl_dir(dir: &Path, home: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let p = e.path();
+            if !wanted_in(&p, home) {
+            } else if p.is_dir() {
+                out.extend(crawl_dir(&p, home))
+            } else {
+                out.push(p)
             }
         }
-        let mut out = Vec::new();
-        walk(&home.join("Documents"), &mut out);
         out
+    }
+    pub fn crawl(home: &Path) -> Vec<PathBuf> {
+        crawl_dir(&home.join("Documents"), home)
+    }
+    pub fn is_media(p: &Path) -> bool {
+        p.extension().is_some_and(|e| e == "jpg" || e == "mp3")
+    }
+    pub fn media_stamp(p: &Path, _home: &Path) -> Option<String> {
+        let t = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).map(|t| format!("{t:?}")).ok();
+        Some(format!("m{}{}", t(p)?, t(&p.with_extension("lrc")).unwrap_or_default()))
+    }
+    fn media(p: &Path, home: &Path, stamp: String, parts: Vec<Part>) -> Option<Doc> {
+        let name = p.file_name()?.to_string_lossy().into_owned();
+        let kind = if p.extension()? == "jpg" { Kind::Image } else { Kind::Audio };
+        let action = Action::Open { path: p.display().to_string(), locator: Locator::default() };
+        Some(Doc { key: file_key(home, p), kind, title: name, subtitle: String::new(), icon: "image-x-generic".into(), action, stamp, names: Vec::new(), parts })
+    }
+    pub fn quick_doc(p: &Path, home: &Path, _cache: &Path) -> Option<Doc> {
+        media(p, home, format!("quick-{}", media_stamp(p, home)?), Vec::new())
+    }
+    /// A photo's picture is copied to <cache>/<name>/f0001.jpg, as ss-media names frames.
+    pub fn media_doc(p: &Path, home: &Path, cache: &Path) -> Option<Doc> {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let part = if p.extension()? == "jpg" {
+            let img = cache.join(p.file_name()?).join("f0001.jpg");
+            std::fs::create_dir_all(img.parent()?).ok()?;
+            std::fs::copy(p, &img).ok()?;
+            Part { text: String::new(), locator: Locator::default(), embed: Embed::Image(img) }
+        } else {
+            let text = std::fs::read_to_string(p.with_extension("lrc")).unwrap_or_default();
+            Part { embed: Embed::Text(doc_text("song", &text)), text, locator: Locator { t: Some(1.0), ..Locator::default() } }
+        };
+        media(p, home, media_stamp(p, home)?, vec![part])
+    }
+    pub fn forget(p: &Path, _cache: &Path) {
+        FORGOT.lock().unwrap().push(p.to_path_buf());
+    }
+    pub fn lrc_owner(lrc: &Path) -> Option<PathBuf> {
+        (lrc.extension()? == "lrc").then(|| lrc.with_extension("mp3"))
+    }
+    pub fn default_browser() -> Option<String> {
+        Some("firefox".into())
     }
     pub fn file_doc(p: &Path, _home: &Path) -> Option<Doc> {
         let text = std::fs::read_to_string(p).ok()?;
@@ -47,12 +96,6 @@ pub mod ext {
             names: Vec::new(),
             parts: vec![Part { embed: Embed::Text(doc_text(&name, &text)), text, locator: Locator { line: Some(1), ..Locator::default() } }],
         })
-    }
-    pub fn is_media(_: &Path) -> bool {
-        false
-    }
-    pub fn media_doc(_: &Path, _: &Path, _: &Path) -> Option<Doc> {
-        None
     }
     pub fn apps() -> Vec<Doc> {
         Vec::new()
@@ -98,19 +141,35 @@ fn fake_vec(text: &str) -> Vec<f32> {
 }
 
 /// A local HTTP server answering /v1/embeddings like llama-server; queries
-/// wait `delay`; any input containing REFUSE fails the whole request.
-fn fake_embedder(delay: Duration) -> String {
+/// wait `delay` and are counted in `queries`; any input containing REFUSE
+/// fails the whole request; a picture's words are the file's text.
+fn fake_embedder(delay: Duration, queries: Arc<AtomicUsize>) -> String {
     let l = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}/v1/embeddings", l.local_addr().unwrap());
     std::thread::spawn(move || {
         for s in l.incoming().flatten() {
-            std::thread::spawn(move || serve_fake(s, delay));
+            let queries = queries.clone();
+            std::thread::spawn(move || serve_fake(s, delay, &queries));
         }
     });
     url
 }
 
-fn serve_fake(mut s: TcpStream, delay: Duration) {
+fn unbase64(s: &str) -> String {
+    const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let (mut bits, mut n, mut out) = (0u32, 0, Vec::new());
+    for v in s.bytes().filter_map(|c| T.iter().position(|&x| x == c)) {
+        bits = (bits << 6 | v as u32) & 0xffff;
+        n += 6;
+        if n >= 8 {
+            n -= 8;
+            out.push((bits >> n) as u8);
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn serve_fake(mut s: TcpStream, delay: Duration, queries: &AtomicUsize) {
     let (mut buf, mut chunk) = (Vec::new(), [0u8; 65536]);
     let body = loop {
         let n = s.read(&mut chunk).unwrap_or(0);
@@ -127,8 +186,10 @@ fn serve_fake(mut s: TcpStream, delay: Duration) {
         }
     };
     let v: Value = serde_json::from_slice(&body).unwrap_or_default();
-    let inputs: Vec<String> = v["input"].as_array().into_iter().flatten().map(|x| x.as_str().unwrap_or("image").to_string()).collect();
+    let picture = |x: &Value| unbase64(x["content"][0]["image_url"]["url"].as_str().and_then(|u| u.split(',').nth(1)).unwrap_or(""));
+    let inputs: Vec<String> = v["input"].as_array().into_iter().flatten().map(|x| x.as_str().map_or_else(|| picture(x), String::from)).collect();
     if inputs.iter().any(|t| t.starts_with("task: search result")) {
+        queries.fetch_add(1, Ordering::SeqCst);
         std::thread::sleep(delay);
     }
     let (status, out) = if inputs.iter().any(|t| t.contains("REFUSE")) {
@@ -140,14 +201,21 @@ fn serve_fake(mut s: TcpStream, delay: Duration) {
     let _ = write!(s, "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{out}", out.len());
 }
 
-const FAKE_CUTOFFS: &str = "[cutoffs]\napp = 0.3\nsetting = 0.3\nfile = 0.3\nclip = 0.3\nemoji = 0.3\nhistory = 0.3\n";
+const FAKE_CUTOFFS: &str = "[cutoffs]\napp = 0.3\nsetting = 0.3\nfile = 0.3\nclip = 0.3\nemoji = 0.3\nhistory = 0.3\nframe = 0.5\n";
 
 struct T {
     d: Arc<Daemon>,
     dir: PathBuf,
+    /// Query embeddings asked for so far.
+    queries: Arc<AtomicUsize>,
 }
 
 fn start(delay_ms: u64, prefs: &str) -> T {
+    start_with(delay_ms, prefs, None, |_| {})
+}
+
+/// `index_url` replaces the index server (e.g. one that is down); `setup` runs on the home before the daemon starts.
+fn start_with(delay_ms: u64, prefs: &str, index_url: Option<&str>, setup: impl FnOnce(&std::path::Path)) -> T {
     static N: AtomicUsize = AtomicUsize::new(0);
     let dir = std::env::temp_dir().join(format!("ss{}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
     let _ = std::fs::remove_dir_all(&dir);
@@ -155,7 +223,9 @@ fn start(delay_ms: u64, prefs: &str) -> T {
     std::fs::create_dir_all(dir.join("config")).unwrap();
     let dir = dir.canonicalize().unwrap();
     std::fs::write(dir.join("config/preferences.toml"), format!("{prefs}\n{FAKE_CUTOFFS}")).unwrap();
-    let url = fake_embedder(Duration::from_millis(delay_ms));
+    setup(&dir.join("home"));
+    let queries = Arc::new(AtomicUsize::new(0));
+    let url = fake_embedder(Duration::from_millis(delay_ms), queries.clone());
     let cfg = Cfg {
         home: dir.join("home"),
         state: dir.join("state"),
@@ -163,19 +233,16 @@ fn start(delay_ms: u64, prefs: &str) -> T {
         config: dir.join("config"),
         sock: dir.join("s.sock"),
         query_url: url.clone(),
-        index_url: url,
+        index_url: index_url.map_or(url, String::from),
     };
     let d = Daemon::open(cfg).unwrap();
     let l = server::bind(&d.cfg.sock).unwrap();
     ingest::start(&d);
     let d2 = d.clone();
     std::thread::spawn(move || server::listen(d2, l));
-    let idle = || {
-        let q = d.fast.lock().unwrap();
-        !q.rescan && !q.sources && q.paths.is_empty() && !d.busy.load(Ordering::SeqCst)
-    };
-    until("first scan", Duration::from_secs(5), idle);
-    T { d, dir }
+    let t = T { d, dir, queries };
+    until("first scan", Duration::from_secs(5), || t.idle());
+    t
 }
 
 fn doc(key: &str, kind: Kind, title: &str, body: &str, names: &[&str]) -> Doc {
@@ -206,13 +273,17 @@ fn until(what: &str, limit: Duration, mut ok: impl FnMut() -> bool) -> Duration 
 }
 
 impl T {
+    fn idle(&self) -> bool {
+        let q = self.d.fast.lock().unwrap();
+        !q.rescan && q.sources.is_empty() && q.paths.is_empty() && self.d.busy.load(Ordering::SeqCst) == 0
+    }
     fn put(&self, docs: Vec<Doc>) {
         self.d.store.put(docs.into_iter().map(|d| (d, "1".into(), 0)).collect()).unwrap();
         self.d.wake_embedder();
         until("embedding", Duration::from_secs(5), || self.d.store.counts().0 == 0);
     }
     fn search(&self, q: &str) -> (Vec<Row>, bool) {
-        search::search(&self.d, q, 30, self.d.query_vec(q).as_ref())
+        search::search(&self.d, q, 30, self.d.query_vec(q).as_ref(), None)
     }
     fn keys(&self, q: &str) -> Vec<String> {
         self.search(q).0.into_iter().map(|r| r.key).collect()
@@ -250,7 +321,7 @@ fn names_keywords_and_meaning_rank_as_designed() {
     assert_eq!((rows[0].key.as_str(), rows[0].why), ("app:terminal", Why::Name));
     assert_eq!(t.keys("console")[0], "app:terminal", "names match too");
     assert_eq!(t.keys("lease.pdf")[0], "file:Documents/lease.pdf", "exact file names hit");
-    let (rows, empty) = search::search(&t.d, "rent due", 30, None);
+    let (rows, empty) = search::search(&t.d, "rent due", 30, None, None);
     assert!(!empty);
     assert_eq!((rows[0].key.as_str(), rows[0].why), ("file:Documents/lease.pdf", Why::Keyword));
     assert_eq!(t.keys("rent due")[0], "file:Documents/lease.pdf");
@@ -258,7 +329,7 @@ fn names_keywords_and_meaning_rank_as_designed() {
     let marked: Vec<String> = sn.marks.iter().map(|&(a, b)| sn.text.chars().skip(a).take(b - a).collect()).collect();
     assert_eq!(marked, ["rent", "due"]);
     // Meaning only: no shared word, so the instant phase has nothing local.
-    let (rows, empty) = search::search(&t.d, "retriever", 30, None);
+    let (rows, empty) = search::search(&t.d, "retriever", 30, None, None);
     assert!(empty && rows.len() == 1);
     let (rows, empty) = t.search("retriever");
     assert!(!empty);
@@ -393,7 +464,7 @@ fn watcher_indexes_and_forgets_files_within_2s() {
     std::fs::create_dir_all(f.parent().unwrap()).unwrap();
     std::fs::write(&f, "zebra crossing near the school").unwrap();
     let key = "file:Documents/new/zebra.txt";
-    let has = |t: &T| search::search(&t.d, "zebra crossing", 30, None).0.iter().any(|r| r.key == key);
+    let has = |t: &T| search::search(&t.d, "zebra crossing", 30, None, None).0.iter().any(|r| r.key == key);
     let added = until("new file", Duration::from_secs(2), || has(&t));
     std::fs::write(&f, "now about giraffes").unwrap();
     let changed = until("changed file", Duration::from_secs(2), || !has(&t));
@@ -491,4 +562,164 @@ fn bench_50k_parts_instant_under_15ms() {
     let cfg = Cfg { state: dir.clone(), ..Cfg::from_env() };
     let worst = crate::bench::run(&cfg, 50_000).unwrap();
     assert!(worst < 15.0, "instant p95 {worst} ms");
+}
+
+#[test]
+fn calm_typing_embeds_once_per_pause() {
+    let t = start(0, "");
+    corpus(&t);
+    let mut s = std::os::unix::net::UnixStream::connect(&t.d.cfg.sock).unwrap();
+    s.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+    let mut r = BufReader::new(s.try_clone().unwrap());
+    let sent = Instant::now();
+    for (id, q) in [(1, "pup"), (2, "pupp"), (3, "puppy")] {
+        writeln!(s, r#"{{"op":"search","id":{id},"q":"{q}"}}"#).unwrap();
+        std::thread::sleep(Duration::from_millis(60));
+    }
+    let got = read_responses(&mut r, Instant::now() + Duration::from_millis(600));
+    let finals: Vec<&Value> = got.iter().filter(|v| v["phase"] == "final").collect();
+    assert_eq!(finals.iter().map(|v| v["id"].as_u64().unwrap()).collect::<Vec<_>>(), [3]);
+    assert!(finals[0]["timing"]["total_ms"].as_f64().unwrap() >= 150.0, "the final waits for a 150 ms pause");
+    assert_eq!(t.queries.load(Ordering::SeqCst), 1, "superseded searches are never embedded");
+    assert!(sent.elapsed() < Duration::from_secs(2));
+    // A client that has said all it will say gets its final at once.
+    let t0 = Instant::now();
+    assert_eq!(client::search(&t.d.cfg, "puppy plays", None, 5).unwrap()["phase"], "final");
+    assert!(t0.elapsed() < Duration::from_millis(120), "the CLI waited {:?}", t0.elapsed());
+}
+
+#[test]
+fn keyword_and_names_work_before_embeddings() {
+    let t = start_with(0, "", Some("http://127.0.0.1:9/v1/embeddings"), |_| {});
+    std::thread::sleep(Duration::from_millis(500));
+    std::fs::write(t.dir.join("home/Documents/bond.txt"), "a rental bond of two thousand four hundred dollars").unwrap();
+    until("keyword match with no vectors", Duration::from_secs(2), || {
+        t.keys("two thousand four hundred dollars").contains(&"file:Documents/bond.txt".to_string())
+    });
+    assert_eq!(t.keys("bond.txt")[0], "file:Documents/bond.txt", "and by name");
+    assert!(t.d.store.counts().0 > 0, "its vectors are still pending");
+    assert!(t.search("security deposit").1, "meaning waits for the vectors");
+}
+
+#[test]
+fn media_is_found_by_name_at_once_then_by_content_and_forgotten() {
+    let t = start(0, "");
+    std::thread::sleep(Duration::from_millis(500));
+    let docs = t.dir.join("home/Documents");
+    std::fs::write(docs.join("beach-day.jpg"), "golden retriever swimming").unwrap();
+    std::fs::write(docs.join("rain.lrc"), "clouds over the harbour").unwrap();
+    std::fs::write(docs.join("rain.mp3"), "audio").unwrap();
+    let (photo, song) = ("file:Documents/beach-day.jpg", "file:Documents/rain.mp3");
+    until("names before the slow pass", Duration::from_millis(1500), || {
+        t.keys("beach-day").first().map(String::as_str) == Some(photo) && t.keys("rain.mp3").first().map(String::as_str) == Some(song)
+    });
+    until("photo by meaning", Duration::from_secs(5), || t.keys("retriever").first().map(String::as_str) == Some(photo));
+    let (rows, _) = t.search("retriever");
+    let thumb = rows[0].hits[0].thumb.as_deref().unwrap();
+    assert!(thumb.ends_with("beach-day.jpg/t0001.jpg"), "hit thumb is the small picture: {thumb}");
+    until("song words", Duration::from_secs(5), || t.keys("harbour").contains(&song.to_string()));
+    std::fs::write(docs.join("rain.lrc"), "sunshine on the river").unwrap();
+    until("song read again after its .lrc changed", Duration::from_secs(5), || t.keys("sunshine").contains(&song.to_string()));
+    std::fs::remove_file(docs.join("beach-day.jpg")).unwrap();
+    until("deleted photo", Duration::from_secs(2), || !t.keys("beach-day").contains(&photo.to_string()));
+    assert!(ext::FORGOT.lock().unwrap().contains(&docs.join("beach-day.jpg")), "its frames are forgotten");
+}
+
+#[test]
+fn every_wanted_folder_is_watched_but_not_ignored_ones() {
+    let t = start_with(0, "", None, |home| std::fs::create_dir_all(home.join("Documents/empty/deeper")).unwrap());
+    std::thread::sleep(Duration::from_millis(500));
+    let docs = t.dir.join("home/Documents");
+    std::fs::write(docs.join("empty/deeper/otter.txt"), "otter facts").unwrap();
+    until("file in a folder that was empty at start", Duration::from_secs(2), || t.keys("otter").len() == 2);
+    std::fs::create_dir_all(docs.join("proj/node_modules/pkg")).unwrap();
+    std::fs::create_dir_all(docs.join("proj/src/deep")).unwrap();
+    std::fs::write(docs.join("proj/node_modules/pkg/badger.txt"), "badger").unwrap();
+    std::fs::write(docs.join("proj/src/deep/badger.txt"), "badger").unwrap();
+    until("new folder crawled", Duration::from_secs(2), || t.keys("badger").len() == 2);
+    std::fs::write(docs.join("proj/src/deep/later.txt"), "badger later").unwrap();
+    until("new subfolder watched", Duration::from_secs(2), || t.keys("badger").len() == 3);
+    assert!(!t.keys("badger").iter().any(|k| k.contains("node_modules")));
+}
+
+/// Pictures whose "pixels" are words for the fake embedder.
+fn pictures(t: &T) {
+    let mut docs = Vec::new();
+    for (name, words) in [("dog.jpg", "golden retriever park"), ("sunset.jpg", "golden sunset beach"), ("cat.jpg", "cat sofa photo image")] {
+        let img = t.dir.join(format!("cache/{name}/f0001.jpg"));
+        std::fs::create_dir_all(img.parent().unwrap()).unwrap();
+        std::fs::write(&img, words).unwrap();
+        let part = Part { text: String::new(), locator: Locator::default(), embed: Embed::Image(img) };
+        docs.push(Doc { kind: Kind::Image, parts: vec![part], ..doc(&format!("file:Pictures/{name}"), Kind::Image, name, "", &[]) });
+    }
+    t.put(docs);
+}
+
+#[test]
+fn picture_features_leave_files_and_apps_alone() {
+    let t = start(0, "");
+    corpus(&t);
+    pictures(&t);
+    let queries = ["term", "rent due", "retriever", "puppy plays", "shopping list", "web browser"];
+    let others = |t: &T| -> Vec<Vec<(String, f32)>> {
+        queries.iter().map(|q| t.search(q).0.into_iter().filter(|r| r.kind != Kind::Image).map(|r| (r.key, r.score)).collect()).collect()
+    };
+    // Off by default: no extra query input, no feature value, so scores are as in round 1.
+    let before = others(&t);
+    assert!(t.d.query_vec("golden retriever").unwrap().photo.is_none());
+    for key in ["file:Pictures/dog.jpg", "file:Pictures/cat.jpg"] {
+        let e = t.req(json!({"op": "explain", "id": 1, "q": "golden retriever", "key": key}));
+        assert!(e["features"]["photo"].is_null() && e["features"]["generic"].is_null(), "{e}");
+    }
+    let asked = t.queries.load(Ordering::SeqCst);
+    {
+        let mut w = t.d.weights.write().unwrap();
+        w[search::PHOTO] = 0.9;
+        w[search::GENERIC] = -1.0;
+    }
+    // On: files and apps keep their order (scores may move a little through the margin feature).
+    let keys = |v: &[Vec<(String, f32)>]| v.iter().map(|r| r.iter().map(|x| x.0.clone()).collect::<Vec<_>>()).collect::<Vec<_>>();
+    assert_eq!(keys(&others(&t)), keys(&before));
+    for q in queries {
+        assert_ne!(t.search(q).0[0].kind, Kind::Image, "{q}: no picture jumps above the file or app");
+    }
+    assert_eq!(t.keys("golden retriever")[0], "file:Pictures/dog.jpg");
+    // "a photo of cat" matches the cat picture better than "cat" does.
+    let e = t.req(json!({"op": "explain", "id": 1, "q": "cat", "key": "file:Pictures/cat.jpg"}));
+    assert!(e["features"]["photo"]["value"].as_f64().unwrap() > 0.0, "{e}");
+    assert!(t.d.generic.get().is_some(), "generic captions embedded once the feature is on");
+    assert!(t.queries.load(Ordering::SeqCst) > asked);
+}
+
+#[test]
+fn kinds_alt_actions_and_the_browser_icon() {
+    let t = start(0, "");
+    corpus(&t);
+    t.put(vec![Doc { icon: "firefox-icon".into(), ..doc("app:firefox", Kind::App, "Firefox", "Browse the web", &["web browser"]) }]);
+    let search = |q: &str, kinds: Value| {
+        let v = serde_json::to_value(t.d.handle(serde_json::from_value(json!({"op": "search", "id": 1, "q": q, "kinds": kinds})).unwrap())).unwrap();
+        (v["rows"].as_array().unwrap().iter().map(|r| r["kind"].as_str().unwrap().to_string()).collect::<Vec<_>>(), v["empty"].as_bool().unwrap())
+    };
+    assert_eq!(search("rent", json!(["file"])), (vec!["file".to_string()], false));
+    assert_eq!(search("rent", json!(["app"])), (vec![], true));
+    assert_eq!(search("rent", json!(["app", "web"])), (vec!["web".to_string()], true));
+    until("default browser", Duration::from_secs(2), || t.d.browser.read().unwrap().is_some());
+    assert_eq!(t.search("zxqv").0[0].icon, "firefox-icon", "the web row wears the default browser's icon");
+    let alt = |key: &str| t.req(json!({"op": "activate", "id": 1, "key": key, "q": "rent", "alt": true}))["argv"].clone();
+    assert_eq!(alt("file:Documents/lease.pdf"), json!(["xdg-open", "/home/u/Documents"]));
+    assert_eq!(alt("app:terminal"), json!(["wl-copy", "--", "terminal"]));
+    assert_eq!(alt("web:rent"), json!(["wl-copy", "--", "https://duckduckgo.com/?q=rent"]));
+}
+
+#[test]
+fn a_source_whose_text_is_unchanged_still_updates_what_is_shown() {
+    let t = start(0, "");
+    let clip = doc("clip:1", Kind::Clip, "meetup notes", "the meetup is at the library", &[]);
+    let later = Doc { subtitle: "from Chromium · 2 h ago".into(), ..clip.clone() };
+    assert_eq!(ingest::source_stamp(&clip), ingest::source_stamp(&clip.clone()));
+    assert_ne!(ingest::source_stamp(&clip), ingest::source_stamp(&later));
+    t.put(vec![clip]);
+    t.d.store.put(vec![(later.clone(), ingest::source_stamp(&later), 0)]).unwrap();
+    assert_eq!(t.d.store.counts().0, 0, "nothing to embed again");
+    assert_eq!(t.search("library").0[0].subtitle, "from Chromium · 2 h ago");
 }

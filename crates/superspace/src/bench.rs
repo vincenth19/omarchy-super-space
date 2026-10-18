@@ -136,19 +136,16 @@ pub fn run(cfg: &Cfg, parts: usize) -> Result<f32> {
             id += 1;
             let t = Instant::now();
             writeln!(s, "{}", serde_json::json!({"op": "search", "id": id, "q": q}))?;
-            let mut got_instant = false;
             for line in lines.by_ref() {
                 let v: serde_json::Value = serde_json::from_str(&line?)?;
-                if v["phase"] == "instant" && !got_instant {
+                if v["id"] == id && v["phase"] == "instant" {
                     sock.push(t.elapsed().as_secs_f32() * 1000.0);
                     nrows = v["rows"].as_array().map_or(0, Vec::len);
-                    got_instant = true;
-                } else if v["phase"] == "final" {
                     break;
                 }
             }
             let t = Instant::now();
-            search::search(&d, q, 30, None);
+            search::search(&d, q, 30, None, None);
             inproc.push(t.elapsed().as_secs_f32() * 1000.0);
         }
         let (p50, p95, max) = stats(sock);
@@ -156,12 +153,12 @@ pub fn run(cfg: &Cfg, parts: usize) -> Result<f32> {
         println!("{:<34} {p50:>8.2} {p95:>8.2} {max:>8.2} {:>8.2}  {nrows}", format!("{q:?}"), stats(inproc).1);
     }
     let mut rng = Rng(42);
-    let qv = quantize(&normalize((0..DIM).map(|_| rng.f() - 0.5).collect()));
+    let qv = search::QVecs { q: quantize(&normalize((0..DIM).map(|_| rng.f() - 0.5).collect())), photo: None };
     let mut ms = Vec::new();
     for q in &queries[3..6] {
         for _ in 0..10 {
             let t = Instant::now();
-            search::search(&d, q, 30, Some(&qv));
+            search::search(&d, q, 30, Some(&qv), None);
             ms.push(t.elapsed().as_secs_f32() * 1000.0);
         }
     }

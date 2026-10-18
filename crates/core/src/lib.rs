@@ -165,9 +165,11 @@ pub struct Answer {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
-    Search { id: u64, q: String, #[serde(default = "default_limit")] limit: usize },
-    /// Run a row's action; `hit` picks a part (page, moment) to open at.
-    Activate { id: u64, key: String, #[serde(default)] q: String, #[serde(default)] hit: Option<usize> },
+    /// `kinds`: only rows of these kinds (the web row only when it lists `web`).
+    Search { id: u64, q: String, #[serde(default = "default_limit")] limit: usize, #[serde(default)] kinds: Option<Vec<Kind>> },
+    /// Run a row's action; `hit` picks a part (page, moment) to open at; `alt` is the
+    /// alternative action (show a file in its folder, else copy what the row points at).
+    Activate { id: u64, key: String, #[serde(default)] q: String, #[serde(default)] hit: Option<usize>, #[serde(default)] alt: bool },
     Read { id: u64, key: String, #[serde(default)] part: Option<usize> },
     Similar { id: u64, key: String, #[serde(default = "default_limit")] limit: usize },
     Explain { id: u64, q: String, key: String },

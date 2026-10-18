@@ -18,6 +18,13 @@ use std::path::Path;
 /// A query vector, int8 with its scale.
 pub type QVec = (Vec<i8>, f32);
 
+/// The query's vectors: as typed, and as "a photo of …" (only while the photo feature has a weight).
+#[derive(Clone)]
+pub struct QVecs {
+    pub q: QVec,
+    pub photo: Option<QVec>,
+}
+
 /// Meaning cutoffs (cosine) per kind; "frame" is any part embedded from a
 /// picture (photos, video frames); "name" is the least fuzzy name score that
 /// counts (1.0 = the query itself; word-start matches score 0.87+, scattered
@@ -31,16 +38,23 @@ pub const CUTOFFS: &[(&str, f32)] = &[
     ("clip", 0.64), ("emoji", 0.65), ("history", 0.64), ("frame", 0.68), ("name", 0.80),
 ];
 
-pub const NF: usize = 21;
+pub const NF: usize = 23;
 /// The scorer's features, in weight order; weights.json uses these names.
+/// "photo": how much higher a picture's meaning match is against "a photo of
+/// <q>" (with photo = meaning's weight, a picture scores the better of the two).
+/// "generic": how much more a picture resembles "a photo", "an image", … than
+/// the query's other pictures do (a negative weight sinks pictures that match
+/// everything). Both are 0 by default: on the demo corpus with EmbeddingGemma 2
+/// neither widened the margin of the right photo, and photo costs an extra
+/// query embedding.
 pub const FEATURES: [&str; NF] = [
     "name", "exact", "keyword", "meaning", "margin", "hub", "recency", "fresh", "frecency", "prefix", "boost", "prefer",
-    "app", "setting", "file", "image", "video", "audio", "clip", "emoji", "history",
+    "app", "setting", "file", "image", "video", "audio", "clip", "emoji", "history", "photo", "generic",
 ];
 /// Starting weights (the bench fits better ones; picks then adjust them per user).
 pub const DEFAULT_WEIGHTS: [f32; NF] = [
     1.0, 0.2, 0.7, 0.9, 0.1, 0.2, 0.05, 0.03, 0.08, 0.3, 1.0, 0.05,
-    0.05, 0.03, 0.0, 0.0, 0.0, 0.0, -0.02, -0.03, -0.02,
+    0.05, 0.03, 0.0, 0.0, 0.0, 0.0, -0.02, -0.03, -0.02, 0.0, 0.0,
 ];
 const KINDS: [Kind; 9] =
     [Kind::App, Kind::Setting, Kind::File, Kind::Image, Kind::Video, Kind::Audio, Kind::Clip, Kind::Emoji, Kind::History];
@@ -56,6 +70,8 @@ const FRECENCY: usize = 8;
 const PREFIX: usize = 9;
 const BOOST: usize = 10;
 const PREFER: usize = 11;
+pub const PHOTO: usize = 21;
+pub const GENERIC: usize = 22;
 /// Cosine above the cutoff that counts as a full meaning match.
 const MEANING_SPAN: f32 = 0.15;
 const PIN_SCORE: f32 = 10.0;
@@ -78,6 +94,8 @@ pub struct Sig {
     pub cosine: f32,
     pub cutoff: f32,
     pub hub: f32,
+    /// Cosine of the best matching picture to the generic captions.
+    pub generic: Option<f32>,
     hits: Vec<H>,
     snip: Option<i64>,
 }
@@ -93,7 +111,7 @@ struct H {
 impl Sig {
     pub fn why(&self, w: &[f32; NF]) -> Why {
         let c = |i: usize| self.f[i] * w[i];
-        let (name, kw, meaning) = (c(NAME) + c(EXACT), c(KEYWORD), c(MEANING) + c(MARGIN) + c(HUB));
+        let (name, kw, meaning) = (c(NAME) + c(EXACT), c(KEYWORD), c(MEANING) + c(MARGIN) + c(HUB) + c(PHOTO) + c(GENERIC));
         match () {
             _ if self.pinned => Why::Pinned,
             _ if name.max(kw).max(meaning) <= 0.0 => Why::Recent,
@@ -218,7 +236,7 @@ fn cos(mem: &Mem, row: usize, q: &QVec) -> f32 {
 }
 
 /// Every candidate for `q` (plus `extra`), scored. Not sorted; check `kept`.
-pub fn rank(d: &Daemon, mem: &Mem, q: &str, qv: Option<&QVec>, extra: Option<i64>) -> Vec<(i64, Sig)> {
+pub fn rank(d: &Daemon, mem: &Mem, q: &str, qv: Option<&QVecs>, extra: Option<i64>) -> Vec<(i64, Sig)> {
     let prefs = d.prefs.read().unwrap();
     let w = *d.weights.read().unwrap();
     let prefer = d.prefer.read().unwrap();
@@ -231,7 +249,8 @@ pub fn rank(d: &Daemon, mem: &Mem, q: &str, qv: Option<&QVec>, extra: Option<i64
             kw.entry(p.item).or_default().push((pid, s));
         }
     }
-    let scores: Vec<f32> = qv.map(|v| (0..mem.rows.len()).map(|r| cos(mem, r, v)).collect()).unwrap_or_default();
+    let scores: Vec<f32> = qv.map(|v| (0..mem.rows.len()).map(|r| cos(mem, r, &v.q)).collect()).unwrap_or_default();
+    let (photo, generic) = (qv.and_then(|v| v.photo.as_ref()), d.generic.get().filter(|_| w[GENERIC] != 0.0));
     let (prefix, recent) = pick_weights(&d.picks.read().unwrap(), &qn, now);
     let pins: HashSet<&str> = prefs.pin.iter().filter(|p| norm(&p.q) == qn).map(|p| p.key.as_str()).collect();
 
@@ -261,12 +280,19 @@ pub fn rank(d: &Daemon, mem: &Mem, q: &str, qv: Option<&QVec>, extra: Option<i64
             s.bm25 = b;
             f[KEYWORD] = 0.3 + 0.7 * b.max(0.0) / (b.max(0.0) + 3.0);
         }
-        // Meaning: each part against its own cutoff (pictures score higher for everything).
-        let (mut above, mut best) = (HashMap::new(), None::<(i64, usize, f32)>);
+        // Meaning: each part against its own cutoff (pictures score higher for
+        // everything); a picture also against "a photo of <q>", keeping the better.
+        let (mut above, mut best, mut plain) = (HashMap::new(), None::<(i64, usize, f32)>, 0f32);
         for &pid in &it.parts {
             let Some((pm, r)) = mem.parts.get(&pid).and_then(|p| p.row.filter(|_| !scores.is_empty()).map(|r| (p, r))) else { continue };
-            let c = scores[r];
-            let rel = ((c - if pm.image.is_some() { fcut } else { s.cutoff }) / MEANING_SPAN).clamp(0.0, 1.0);
+            let picture = pm.image.is_some();
+            let relevance = |c: f32| ((c - if picture { fcut } else { s.cutoff }) / MEANING_SPAN).clamp(0.0, 1.0);
+            plain = plain.max(relevance(scores[r]));
+            let c = match photo.filter(|_| picture) {
+                Some(pv) => scores[r].max(cos(mem, r, pv)),
+                None => scores[r],
+            };
+            let rel = relevance(c);
             s.cosine = s.cosine.max(c);
             if rel > 0.0 {
                 above.insert(pid, c);
@@ -275,10 +301,14 @@ pub fn rank(d: &Daemon, mem: &Mem, q: &str, qv: Option<&QVec>, extra: Option<i64
                 }
             }
         }
-        if let Some((_, r, rel)) = best {
-            f[MEANING] = rel;
+        if let Some((pid, r, rel)) = best {
+            f[MEANING] = plain;
+            f[PHOTO] = rel - plain;
+            if let Some(g) = generic.filter(|_| mem.parts[&pid].image.is_some()) {
+                s.generic = Some(cos(mem, r, g));
+            }
             s.hub = cos(mem, r, &centroid);
-            f[HUB] = ((scores[r] - s.hub) * 2.0).clamp(0.0, 1.0);
+            f[HUB] = ((above[&pid] - s.hub) * 2.0).clamp(0.0, 1.0);
             if !prefer.is_empty() {
                 let p = it.parts.iter().filter_map(|pid| mem.parts.get(pid)?.row).flat_map(|r| prefer.iter().map(move |v| (r, v)));
                 let pc = p.map(|(r, v)| cos(mem, r, v)).fold(f32::MIN, f32::max);
@@ -299,7 +329,7 @@ pub fn rank(d: &Daemon, mem: &Mem, q: &str, qv: Option<&QVec>, extra: Option<i64
         }
         s.pinned = pins.contains(it.key.as_str());
         s.excluded = prefs.exclude.iter().any(|r| rule_hits(r, it, &d.cfg.home));
-        s.kept = !s.excluded && (f[NAME] > 0.0 || f[KEYWORD] > 0.0 || f[MEANING] > 0.0 || f[PREFIX] > 0.0 || s.pinned);
+        s.kept = !s.excluded && (f[NAME] > 0.0 || f[KEYWORD] > 0.0 || f[MEANING] + f[PHOTO] > 0.0 || f[PREFIX] > 0.0 || s.pinned);
         s.hits = hits(mem, it, &above, kparts);
         let text_part = |pid: &&i64| mem.parts.get(pid).is_some_and(|p| p.image.is_none());
         let mut by_meaning: Vec<_> = above.iter().collect();
@@ -312,8 +342,14 @@ pub fn rank(d: &Daemon, mem: &Mem, q: &str, qv: Option<&QVec>, extra: Option<i64
         };
         out.push((id, s));
     }
+    // Generic: relative to the other pictures this query matched.
+    let gens: Vec<f32> = out.iter().filter_map(|x| x.1.generic).collect();
+    let mean = gens.iter().sum::<f32>() / gens.len().max(1) as f32;
+    for (_, s) in &mut out {
+        s.f[GENERIC] = s.generic.map_or(0.0, |g| g - mean);
+    }
     // Margin: how far a meaning match leads the next one.
-    let mut m: Vec<(usize, f32)> = out.iter().enumerate().filter(|x| x.1.1.f[MEANING] > 0.0).map(|(i, x)| (i, x.1.cosine)).collect();
+    let mut m: Vec<(usize, f32)> = out.iter().enumerate().filter(|x| x.1.1.f[MEANING] + x.1.1.f[PHOTO] > 0.0).map(|(i, x)| (i, x.1.cosine)).collect();
     m.sort_by(|a, b| b.1.total_cmp(&a.1));
     for (j, &(i, c)) in m.iter().enumerate() {
         let next = m.get(j + 1).map_or(out[i].1.cutoff, |x| x.1);
@@ -329,7 +365,10 @@ pub fn rank(d: &Daemon, mem: &Mem, q: &str, qv: Option<&QVec>, extra: Option<i64
 /// into one moment), else keyword-matched parts. Only parts with somewhere to
 /// jump to (a locator or a picture).
 fn hits(mem: &Mem, it: &Item, above: &HashMap<i64, f32>, kw: Option<&Vec<(i64, f32)>>) -> Vec<H> {
-    let h = |pid: i64, score: f32| H { loc: mem.parts[&pid].locator.clone(), score, part: pid, thumb: mem.parts[&pid].image.clone() };
+    // Photos and video frames show their small thumbnail; other pictures (image clips) themselves.
+    let media = matches!(it.kind, Kind::Image | Kind::Video);
+    let thumb = |img: &String| if media { ss_media::thumb(Path::new(img)).display().to_string() } else { img.clone() };
+    let h = |pid: i64, score: f32| H { loc: mem.parts[&pid].locator.clone(), score, part: pid, thumb: mem.parts[&pid].image.as_ref().map(thumb) };
     let mut out = Vec::new();
     if above.is_empty() {
         out.extend(kw.into_iter().flatten().map(|&(pid, s)| h(pid, s)));
@@ -439,35 +478,41 @@ pub fn web_row(q: &str) -> Row {
         why: Why::Keyword, snippet: None, hits: Vec::new() }
 }
 
-/// Ranked rows (web row last) and whether nothing local matched. An empty
-/// query lists recently picked items instead.
-pub fn search(d: &Daemon, q: &str, limit: usize, qv: Option<&QVec>) -> (Vec<Row>, bool) {
+/// Ranked rows (web row last) and whether nothing local matched; only rows
+/// of `kinds` when given. An empty query lists recently picked items instead.
+pub fn search(d: &Daemon, q: &str, limit: usize, qv: Option<&QVecs>, kinds: Option<&[Kind]>) -> (Vec<Row>, bool) {
     let mem = d.store.mem.read().unwrap();
-    let limit = limit.max(1);
-    if norm(q).is_empty() {
+    let wanted = |id: &i64| kinds.is_none_or(|k| k.contains(&mem.items[id].kind));
+    let web = !norm(q).is_empty() && kinds.is_none_or(|k| k.contains(&Kind::Web));
+    let mut ranked: Vec<(i64, Sig)> = if norm(q).is_empty() {
         let (_, recent) = pick_weights(&d.picks.read().unwrap(), "", now());
-        let mut ranked: Vec<(i64, Sig)> = recent
-            .iter()
-            .filter_map(|(k, w)| Some((*mem.keys.get(k)?, Sig { score: *w, ..Sig::default() })))
-            .collect();
-        ranked.sort_by(|a, b| b.1.score.total_cmp(&a.1.score));
-        ranked.truncate(limit);
-        let rows = rows(d, &mem, &ranked, q);
-        let empty = rows.is_empty();
-        return (rows, empty);
-    }
-    let mut ranked: Vec<(i64, Sig)> = rank(d, &mem, q, qv, None).into_iter().filter(|x| x.1.kept).collect();
-    order(&mem, &mut ranked);
-    ranked.truncate(limit - 1);
+        let mut v: Vec<(i64, Sig)> =
+            recent.iter().filter_map(|(k, w)| Some((*mem.keys.get(k)?, Sig { score: *w, ..Sig::default() }))).collect();
+        v.sort_by(|a, b| b.1.score.total_cmp(&a.1.score));
+        v
+    } else {
+        let mut v: Vec<(i64, Sig)> = rank(d, &mem, q, qv, None).into_iter().filter(|x| x.1.kept).collect();
+        order(&mem, &mut v);
+        v
+    };
+    ranked.retain(|x| wanted(&x.0));
+    ranked.truncate(limit.max(1) - usize::from(web));
     let mut rows = rows(d, &mem, &ranked, q);
     let empty = rows.is_empty();
-    rows.push(web_row(q));
+    if web {
+        let mut row = web_row(q);
+        // The default browser's own icon, from its indexed desktop entry.
+        if let Some(id) = d.browser.read().unwrap().as_ref().and_then(|b| mem.keys.get(&format!("app:{b}"))) {
+            row.icon = mem.items[id].icon.clone();
+        }
+        rows.push(row);
+    }
     (rows, empty)
 }
 
 /// The row for `key` as `q` ranks it (for activation), after learning from the
 /// pick: the picked row should beat every row that was shown above it.
-pub fn pick(d: &Daemon, q: &str, key: &str, qv: Option<&QVec>) -> Result<Row> {
+pub fn pick(d: &Daemon, q: &str, key: &str, qv: Option<&QVecs>) -> Result<Row> {
     let mem = d.store.mem.read().unwrap();
     let id = *mem.keys.get(key).with_context(|| format!("{key} is not indexed"))?;
     let mut ranked = rank(d, &mem, q, qv, Some(id));
@@ -506,7 +551,7 @@ fn save_weights(path: &Path, w: &[f32; NF]) {
 /// Every signal behind `key`'s score for `q`, each feature with its weight and contribution.
 pub fn explain(d: &Daemon, q: &str, key: &str) -> Result<Value> {
     let qv = d.query_vec(q);
-    let (shown, empty) = search(d, q, 200, qv.as_ref());
+    let (shown, empty) = search(d, q, 200, qv.as_ref(), None);
     let mem = d.store.mem.read().unwrap();
     let id = *mem.keys.get(key).with_context(|| format!("{key} is not indexed"))?;
     let (_, s) = rank(d, &mem, q, qv.as_ref(), Some(id)).into_iter().find(|x| x.0 == id).unwrap();
@@ -523,7 +568,7 @@ pub fn explain(d: &Daemon, q: &str, key: &str) -> Result<Value> {
         "key": key, "title": it.title, "kind": it.kind, "q": q,
         "rank": shown.iter().position(|r| r.key == key), "shown": shown.len(), "empty": empty,
         "kept": s.kept, "why": s.why(&w), "score": s.score, "meaning_used": qv.is_some(),
-        "raw": {"name": s.name, "bm25": s.bm25, "cosine": s.cosine, "cutoff": s.cutoff, "hub": s.hub,
+        "raw": {"name": s.name, "bm25": s.bm25, "cosine": s.cosine, "cutoff": s.cutoff, "hub": s.hub, "generic": s.generic,
                 "pinned": s.pinned, "excluded": s.excluded, "parts": it.parts.len(),
                 "embedded_parts": it.parts.iter().filter(|p| mem.parts.get(p).is_some_and(|p| p.row.is_some())).count()},
         "features": features, "best_part": best,
@@ -540,7 +585,7 @@ pub fn similar(d: &Daemon, key: &str, limit: usize) -> Result<Vec<Row>> {
         acc.iter_mut().zip(mem.vec(r)).for_each(|(a, &x)| *a += x as f32 * mem.scales[r]);
     }
     anyhow::ensure!(acc.iter().any(|x| *x != 0.0), "{key} has no vectors yet");
-    let qv = quantize(&normalize(acc));
+    let qv = QVecs { q: quantize(&normalize(acc)), photo: None };
     let mut ranked: Vec<_> = rank(d, &mem, "", Some(&qv), None).into_iter().filter(|x| x.0 != id && x.1.kept).collect();
     ranked.sort_by(|a, b| b.1.score.total_cmp(&a.1.score));
     ranked.truncate(limit.max(1));

@@ -14,6 +14,8 @@ pub fn call(cfg: &Cfg, req: &Value) -> Result<Value> {
         .with_context(|| format!("cannot reach the daemon at {} (is `superspace serve` running?)", cfg.sock.display()))?;
     s.set_read_timeout(Some(Duration::from_secs(60)))?;
     writeln!(s, "{req}")?;
+    // Nothing more will be asked, so the daemon need not wait for typing to calm down.
+    s.shutdown(std::net::Shutdown::Write)?;
     for line in BufReader::new(s).lines() {
         let v: Value = serde_json::from_str(&line?)?;
         if v["id"] == req["id"] && v["phase"] != "instant" {
@@ -26,18 +28,10 @@ pub fn call(cfg: &Cfg, req: &Value) -> Result<Value> {
     bail!("the daemon closed the connection")
 }
 
-/// A search through the daemon, optionally only some kinds (filtered here:
-/// ranking does not depend on the limit, so this matches a server-side filter).
+/// A search through the daemon, optionally only some kinds ("file,video").
 pub fn search(cfg: &Cfg, q: &str, kinds: Option<&str>, limit: usize) -> Result<Value> {
-    let mut v = call(cfg, &json!({"op": "search", "id": 1, "q": q, "limit": if kinds.is_some() { 500 } else { limit }}))?;
-    if let Some(kinds) = kinds {
-        let want: Vec<&str> = kinds.split(',').map(str::trim).collect();
-        let rows = v["rows"].as_array_mut().context("bad response")?;
-        rows.retain(|r| r["kind"].as_str().is_some_and(|k| want.contains(&k)));
-        rows.truncate(limit);
-        v["empty"] = json!(!rows.iter().any(|r| r["kind"] != "web"));
-    }
-    Ok(v)
+    let kinds: Option<Vec<&str>> = kinds.map(|k| k.split(',').map(str::trim).collect());
+    call(cfg, &json!({"op": "search", "id": 1, "q": q, "limit": limit, "kinds": kinds}))
 }
 
 pub fn cli(cfg: &Cfg, args: &[String]) -> Result<()> {
