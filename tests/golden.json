@@ -10,7 +10,7 @@
 {"id": "demo-breakup-2", "q": "songs about a breakup", "tags": ["demo", "audio", "lyrics"], "want": {"key": "file:Music/Kitchen Radio - Keys on the Counter.mp3"}, "rank": 3},
 {"id": "demo-idr", "q": "100k idr in usd", "tags": ["demo", "answer"], "answer": {"kind": "currency", "range": [4, 9]}},
 {"id": "demo-tz", "q": "3pm sydney in jakarta", "tags": ["demo", "answer"], "answer": {"kind": "time", "re": "\\b11(:00)?\\s*(am|AM)\\b|\\b11:00\\b"}},
-{"id": "demo-wifi", "q": "wifi connect", "tags": ["demo", "setting"], "want": {"kind": "setting", "title": "(?i)wi-?fi"}},
+{"id": "demo-wifi", "q": "wifi connect", "tags": ["demo", "setting"], "want": {"key": "setting:omarchy.network"}},
 {"id": "demo-awkward", "q": "awkward", "tags": ["demo", "emoji"], "want": {"key": "emoji:😬"}},
 {"id": "demo-pitch", "q": "pitch deck pricing", "tags": ["demo", "file", "pptx"], "want": {"key": "file:Documents/Work/kopi-club-pitch-deck.pptx"}, "at": {"slide": 4}},
 {"id": "demo-sales", "q": "quarterly sales spreadsheet", "tags": ["demo", "file", "xlsx"], "want": {"key": "file:Documents/Work/bean-there-sales-q3-2026.xlsx"}},

@@ -1,0 +1,44 @@
+# tests/tune 2026-10-18 on /home/omarchy/.cache/superspace-dev/home: 147 golden cases, margin 0.01.
+# Before {'recall@1': 0.906, 'recall@5': 0.984, 'mrr': 0.94, 'golden_pass': '135/147', 'no_results_empty': '13/19'}
+# After  {'recall@1': 0.906, 'recall@5': 0.945, 'mrr': 0.926, 'golden_pass': '140/147', 'no_results_empty': '19/19'}
+# Checked live on the Pi dev daemon with these values: recall@1 0.906, recall@5 0.945, MRR 0.926,
+# demo script 15/17, 'no results' 19/19 (the Before line is today's values, replayed).
+# [cutoffs] goes into preferences.toml as is.
+[cutoffs]
+app = 0.7
+setting = 0.7
+file = 0.68
+image = 0.67
+video = 0.705
+audio = 0.665
+clip = 0.715
+emoji = 0.705
+history = 0.64
+frame = 0.68
+name = 0.8
+
+# Starting weights for search.rs DEFAULT_WEIGHTS (or weights.json); the daemon does not read this table.
+[weights]
+name = 1.0
+exact = 0.2
+keyword = 0.3
+meaning = 0.9
+margin = 0.25
+hub = 0.2
+recency = 0.05
+fresh = 0.03
+frecency = 0.08
+prefix = 0.3
+boost = 1.0
+prefer = 0.05
+app = 0.05
+setting = 0.03
+file = 0.2
+image = 0.05
+video = 0.25
+audio = 0.0
+clip = -0.02
+emoji = -0.03
+history = -0.02
+photo = 0.0
+generic = 0.0

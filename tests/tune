@@ -1,0 +1,392 @@
+#!/usr/bin/env python3
+"""Fit Super Space's meaning cutoffs and starting weights on the golden queries.
+
+  tests/tune [--margin 0.01] [--cache tests/reports/tune-cache.json]
+
+Run it on the daemon's machine against a fully indexed daemon (SUPERSPACE_SOCK)
+and its query server (SUPERSPACE_QUERY_URL). Needs numpy; on the Pi:
+~/.local/share/basilica/venv/bin/python tests/tune.
+
+1. Collect, once (cached): each golden query's embedding, plain and as "a photo
+   of <q>", and the generic captions; each query's name and keyword signals per
+   item (explain, with meaning switched off in preferences.toml for a moment,
+   restored after); the live top rows. Part vectors come from the index, read-only.
+2. Replay search.rs's scorer offline (it checks itself against the live rows).
+3. Per kind, the cutoff starts just above the best match any "no results"
+   query gets (plus --margin); then cutoffs and weights are improved in turn
+   for the demo script's cases, then recall@1, then golden passes (MRR alone
+   moves nothing), never letting a "no results" query match; a value only
+   moves as far as that needs. Weights stay in BOUNDS.
+4. The same for each photo option: search.rs's "photo" (a picture also scored
+   against "a photo of <q>") and "generic" (how much a picture resembles the
+   generic captions) features with fitted weights, and "debias" (picture scores
+   minus the query's similarity to the mean picture, plus a constant).
+
+Writes tests/tuned.toml (plain: what the daemon runs today) and
+tests/reports/tune-<time>.md. Locators (pages, moments) are not replayed.
+"""
+import argparse, datetime, importlib.machinery, importlib.util, json, os, pathlib, sqlite3, time, urllib.request
+import numpy as np
+
+HERE = pathlib.Path(__file__).resolve().parent
+_spec = importlib.util.spec_from_loader("bench", importlib.machinery.SourceFileLoader("bench", str(HERE / "run")))
+bench = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(bench)
+
+# Mirrors crates/superspace/src/search.rs and server.rs (the self-check below catches drift).
+FEATURES = ["name", "exact", "keyword", "meaning", "margin", "hub", "recency", "fresh", "frecency", "prefix", "boost", "prefer",
+            "app", "setting", "file", "image", "video", "audio", "clip", "emoji", "history", "photo", "generic"]
+KINDS = FEATURES[12:21]
+WEIGHTS = np.array([1.0, 0.2, 0.7, 0.9, 0.1, 0.2, 0.05, 0.03, 0.08, 0.3, 1.0, 0.05,
+                    0.05, 0.03, 0, 0, 0, 0, -0.02, -0.03, -0.02, 0, 0])
+CUTOFFS = {"app": 0.70, "setting": 0.70, "file": 0.64, "image": 0.64, "video": 0.64, "audio": 0.64, "clip": 0.64,
+           "emoji": 0.65, "history": 0.64, "frame": 0.68, "name": 0.80}
+GENERIC_CAPTIONS = ["a photo", "an image", "a picture", "a screenshot"]
+SPAN, CANDIDATES, SHOWN = 0.15, 300, 29
+F = {f: i for i, f in enumerate(FEATURES)}
+# Weights worth fitting, and their range: evidence never counts against a row and keywords always
+# count (DESIGN rule 3); kinds only nudge. Picks, boosts, prefer and history have no bench data;
+# fresh is ~1 for every item.
+BOUNDS = {"name": (0, 3), "exact": (0, 3), "keyword": (0.3, 3), "meaning": (0, 3), "margin": (0, 3), "hub": (0, 3),
+          "recency": (0, 0.3), "photo": (0, 3), "generic": (-2, 0), **{k: (-0.3, 0.3) for k in KINDS if k != "history"}}
+TUNE = [F[f] for f in BOUNDS if f not in ("photo", "generic")]
+OPTIONS = ["plain", "photo", "generic", "photo+generic", "debias"]
+
+
+def q8(v):
+    """search.rs quantize: int8 with one scale per vector, dequantized."""
+    s = np.abs(v).max(axis=-1, keepdims=True) / 127
+    return np.round(v / s) * s
+
+
+def unit(v):
+    return v / np.linalg.norm(v, axis=-1, keepdims=True)
+
+
+def query_text(q):
+    return f"task: search result | query: {q}"
+
+
+def embed(url, texts):
+    req = urllib.request.Request(url, json.dumps({"input": texts}).encode(), {"Content-Type": "application/json"})
+    data = sorted(json.load(urllib.request.urlopen(req, timeout=120))["data"], key=lambda d: d["index"])
+    return unit(np.array([d["embedding"] for d in data], dtype=np.float64))
+
+
+class Index:
+    def __init__(self, path):
+        db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        self.items = {i: {"key": k, "kind": kd, "title": t, "mtime": m, "added": a}
+                      for i, k, kd, t, m, a in db.execute("select id, key, kind, title, mtime, added from items")}
+        rows = db.execute("select item, image is not null, vec, scale from parts where length(vec) = 768 order by id").fetchall()
+        self.item = np.array([r[0] for r in rows])
+        self.img = np.array([bool(r[1]) for r in rows])
+        self.V = np.stack([np.frombuffer(r[2], np.int8) * r[3] for r in rows]).astype(np.float64)
+        self.hub = self.V @ q8(unit(self.V.sum(0)))
+        self.mean_picture = unit(self.V[self.img].mean(0))
+        self.id_of = {it["key"]: i for i, it in self.items.items()}
+        n = max(self.items) + 1
+        self.kind, self.mtime, self.added = np.zeros(n, int), np.zeros(n), np.zeros(n)
+        for i, it in self.items.items():
+            self.kind[i], self.mtime[i], self.added[i] = KINDS.index(it["kind"]), it["mtime"], it["added"]
+
+
+def collect(cfg, conn, cases):
+    """Embeddings, name/keyword signals and live top rows per query."""
+    st = conn.call("status")["value"]
+    qs = list(dict.fromkeys(c["q"] for c in cases))
+    norm = lambda q: " ".join(q.split()).lower()
+    texts = [t for q in qs for t in (query_text(norm(q)), query_text(f"a photo of {norm(q)}"))]
+    vecs = np.concatenate([embed(cfg.url, texts[i:i + 16]) for i in range(0, len(texts), 16)])
+    generic = unit(embed(cfg.url, [query_text(g) for g in GENERIC_CAPTIONS]).mean(0))
+
+    def ms(batch):
+        t = time.perf_counter()
+        embed(cfg.url, batch)
+        return round((time.perf_counter() - t) * 1000)
+    embed_ms = {"one": np.median([ms(texts[2 * i:2 * i + 1]) for i in range(10)]),
+                "with_template": np.median([ms(texts[2 * i:2 * i + 2]) for i in range(10)])}
+    live = {q: [r["key"] for r in bench.local_rows(conn.search(q)["final"])][:5] for q in qs}
+    prefs = pathlib.Path(st["preferences"])
+    saved = prefs.read_text() if prefs.exists() else None
+    if saved and "[cutoffs]" in saved:
+        raise SystemExit(f"{prefs} already has [cutoffs]: remove them while tuning")
+    sig = {}
+
+    def until(done):
+        for _ in range(100):
+            if done(conn.call("prefs")["value"]):
+                return
+            time.sleep(0.2)
+        raise SystemExit(f"the daemon did not reload {prefs}: {conn.call('status')['value'].get('prefs_error')}")
+    try:
+        prefs.write_text((saved or "") + "\n[cutoffs]\n" + "".join(f"{k} = {0.0 if k == 'name' else 9.0}\n" for k in CUTOFFS))
+        until(lambda v: v.get("cutoffs", {}).get("name") == 0.0)
+        for q in qs:
+            sig[q] = {}
+            for k in [r["key"] for r in bench.local_rows(conn.search(q, limit=3000, timeout=20)["final"])]:
+                v = conn.call("explain", q=q, key=k, timeout=20)["value"]
+                sig[q][k] = [v["raw"]["name"], "exact" in v["features"], v["features"].get("keyword", {}).get("value", 0.0)]
+    finally:
+        if saved is None:
+            prefs.unlink()
+        else:
+            prefs.write_text(saved)
+        until(lambda v: not v.get("cutoffs"))
+    data = {"status": st, "queries": qs, "vectors": np.round(vecs, 6).tolist(), "generic": np.round(generic, 6).tolist(),
+            "signals": sig, "live": live, "embed_ms": embed_ms}
+    cfg.cache.write_text(json.dumps(data))
+    return data
+
+
+def prepare(ix, data, option):
+    """Per query: the candidate items and their raw signals, as search.rs's rank() sees them; and
+    the debias constant (median query similarity to the mean picture)."""
+    out = {}
+    qv = q8(np.array(data["vectors"]))
+    gen = ix.V @ q8(np.array(data["generic"]))
+    mu = float(np.median(qv[0::2] @ ix.mean_picture))
+    now = time.time()
+    for n, q in enumerate(data["queries"]):
+        qp, qt = qv[2 * n], qv[2 * n + 1]
+        c = ix.V @ qp
+        if option == "debias":
+            c[ix.img] -= ix.mean_picture @ qp - mu
+        cp = c.copy()  # pictures with "a photo of <q>": the better of the two
+        if "photo" in option:
+            cp[ix.img] = np.maximum(c[ix.img], ix.V[ix.img] @ qt)
+        sig = {ix.id_of[k]: v for k, v in data["signals"][q].items() if k in ix.id_of}
+        ids = np.array(sorted(set(ix.item[np.argsort(-c)[:CANDIDATES]]) | set(sig)))
+        pos = np.full(len(ix.kind), -1)
+        pos[ids] = np.arange(len(ids))
+        p = pos[ix.item]
+        P = {"ids": ids, "kind": ix.kind[ids], "recency": np.where(ix.mtime[ids] > 0, np.exp(-(now - ix.mtime[ids]) / (30 * 86400)), 0),
+             "fresh": np.exp(-(now - ix.added[ids]) / (3 * 86400))}
+        # Best text part, best picture part (as typed) and best picture part (with the photo option), per item.
+        for name, score, flag in (("t", c, False), ("i", c, True), ("p", cp, True)):
+            m = (p >= 0) & (ix.img == flag)
+            best = np.full(len(ids), -np.inf)
+            np.maximum.at(best, p[m], score[m])
+            at = np.flatnonzero(m)[score[m] == best[p[m]]]
+            hub, g = np.zeros(len(ids)), np.zeros(len(ids))
+            hub[p[at]], g[p[at]] = ix.hub[at], gen[at]
+            P["c" + name], P["h" + name], P["g" + name] = best, hub, g
+        s = np.array([sig.get(i, [0.0, False, 0.0]) for i in ids], dtype=float).reshape(-1, 3)
+        P["n"], P["exact"], P["kw"] = s[:, 0], s[:, 1] > 0, s[:, 2]
+        out[q] = P
+    return out, round(mu, 3)
+
+
+def featurize(P, cut, option):
+    kc = np.array([cut[k] for k in KINDS])[P["kind"]]
+    rel = lambda c, cutoff: np.clip((c - cutoff) / SPAN, 0, 1)
+    rt, ri, rp = rel(P["ct"], kc), rel(P["ci"], cut["frame"]), rel(P["cp"], cut["frame"])
+    plain, best, pic = np.maximum(rt, ri), np.maximum(rt, rp), rp > rt
+    cos = np.maximum(P["ct"], P["cp"])
+    hub = np.where(best > 0, np.clip((np.where(pic, P["cp"], P["ct"]) - np.where(pic, P["hp"], P["ht"])) * 2, 0, 1), 0)
+    name = np.where(P["exact"], 1.0, np.clip((P["n"] - cut["name"]) / (1 - cut["name"]), 0, 1))
+    margin = np.zeros(len(kc))
+    o = np.flatnonzero(best > 0)
+    o = o[np.argsort(-cos[o], kind="stable")]
+    if len(o):
+        margin[o] = np.clip((cos[o] - np.append(cos[o[1:]], kc[o[-1]])) * 5, 0, 1)
+    X = np.zeros((len(kc), len(FEATURES)))
+    for f, v in (("name", name), ("exact", P["exact"]), ("keyword", P["kw"]), ("meaning", plain), ("margin", margin),
+                 ("hub", hub), ("recency", P["recency"]), ("fresh", P["fresh"]), ("photo", best - plain)):
+        X[:, F[f]] = v
+    X[np.arange(len(kc)), 12 + P["kind"]] = 1
+    if "generic" in option and (g := pic & (best > 0)).any():
+        X[g, F["generic"]] = P["gp"][g] - P["gp"][g].mean()
+    P["X"], P["kept"] = X, (name > 0) | (P["kw"] > 0) | (best > 0)
+
+
+def ordered(P, w):
+    """search.rs order(): top hit, then 0.1 score bands grouped by kind; the rows shown."""
+    k = np.flatnonzero(P["kept"])
+    if not len(k):
+        return k
+    score, ids, kind = P["X"][k] @ w, P["ids"][k], P["kind"][k]
+    o = np.lexsort((ids, -score))
+    rest = o[1:]
+    if len(rest):
+        u, first = np.unique(kind[rest], return_index=True)
+        group = np.zeros(len(KINDS), int)
+        group[u[np.argsort(first)]] = np.arange(len(u))
+        rest = rest[np.lexsort((ids[rest], -score[rest], group[kind[rest]], -np.floor(score[rest].astype(np.float32) * 10)))]
+    return k[np.concatenate((o[:1], rest))][:SHOWN]
+
+
+def evaluate(cases, Ps, w):
+    """(objective, per-case results): demo cases passed, recall@1 count, golden passes, MRR."""
+    demo = r1 = passes = 0
+    mrr, res = 0.0, []
+    for c in cases:
+        P = Ps[c["q"]]
+        o = ordered(P, w)
+        if c.get("empty"):
+            ok, rank = not len(o), None
+        else:
+            hit = np.flatnonzero(P["mask"][c["id"]][o])
+            rank = int(hit[0]) + 1 if len(hit) else None
+            ok = rank is not None and rank <= c.get("rank", 1)
+            r1 += rank == 1
+            mrr += 1 / rank if rank else 0
+        passes += ok
+        demo += ok and "demo" in c.get("tags", [])
+        res.append({"id": c["id"], "ok": ok, "rank": rank, "top": [int(i) for i in P["ids"][o[:3]]]})
+    return (demo, r1, passes, round(mrr, 4)), res
+
+
+def bounds(cases, Ps, margin):
+    """The lowest cutoffs that keep every "no results" query empty, and which query/item sets each."""
+    lo, why = {k: 0.0 for k in CUTOFFS}, {}
+    for c in (c for c in cases if c.get("empty")):
+        P = Ps[c["q"]]
+        for k, vals, mask in [("name", P["n"], ~P["exact"]), ("frame", P["cp"], np.ones(len(P["n"]), bool))] + \
+                             [(kd, P["ct"], P["kind"] == KINDS.index(kd)) for kd in KINDS]:
+            if mask.any() and vals[mask].max() > lo[k]:
+                j = np.flatnonzero(mask)[vals[mask].argmax()]
+                lo[k], why[k] = float(vals[j]), (c["q"], int(P["ids"][j]))
+    return {k: round(np.ceil((v + margin) * 200) / 200, 3) for k, v in lo.items()}, lo, why
+
+
+def fit(cases, Ps, margin, option, rounds=3):
+    lo = bounds(cases, Ps, margin)[0]
+    cut = {k: max(CUTOFFS[k], lo[k]) for k in CUTOFFS}
+    w = WEIGHTS.copy()
+    tune = TUNE + [F[f] for f in ("photo", "generic") if f in option]
+    if "photo" in option:
+        w[F["photo"]] = w[F["meaning"]]  # a picture scores the better of the two
+    featurize_all = lambda cu: [featurize(P, cu, option) for P in Ps.values()]
+    featurize_all(cut)
+    best = evaluate(cases, Ps, w)[0]
+    for _ in range(rounds):
+        for k in [k for k in CUTOFFS if k != "history"]:
+            # Nearest values first, so a cutoff only moves as far as a strictly better score needs.
+            grid = np.round(np.arange(max(lo[k], cut[k] - 0.1), cut[k] + 0.105, 0.005), 3)
+            for v in sorted(grid, key=lambda v: abs(v - cut[k])):
+                trial = dict(cut, **{k: float(v)})
+                featurize_all(trial)
+                if (score := evaluate(cases, Ps, w)[0])[:3] > best[:3]:
+                    best, cut = score, trial
+            featurize_all(cut)
+        for i in tune:
+            for v in sorted(np.round(np.clip(w[i] + np.arange(-0.5, 0.51, 0.05), *BOUNDS[FEATURES[i]]), 3), key=lambda v: abs(v - w[i])):
+                trial = w.copy()
+                trial[i] = v
+                score = evaluate(cases, Ps, trial)[0]
+                if score[:3] > best[:3]:
+                    best, w = score, trial
+    featurize_all(cut)
+    return cut, w
+
+
+def metrics(cases, res):
+    ranks = [r["rank"] for c, r in zip(cases, res) if "want" in c]
+    n = len(ranks)
+    return {"recall@1": round(sum(r == 1 for r in ranks) / n, 3), "recall@5": round(sum(bool(r and r <= 5) for r in ranks) / n, 3),
+            "mrr": round(sum(1 / r for r in ranks if r) / n, 3), "golden_pass": f"{sum(r['ok'] for r in res)}/{len(res)}",
+            "no_results_empty": f"{sum(r['ok'] for c, r in zip(cases, res) if c.get('empty'))}/{sum(1 for c in cases if c.get('empty'))}"}
+
+
+def photo_stats(cases, Ps, lo_frame):
+    """Picture parts alone: does the wanted picture beat every other picture, and clear the 'no results' bound?"""
+    top = reach = 0
+    gaps = []
+    for c in cases:
+        P = Ps[c["q"]]
+        m = P.get("mask", {}).get(c["id"])
+        if m is None or not np.isfinite(P["cp"][m]).any():
+            continue
+        pos = P["cp"][m].max()
+        top += pos > P["cp"][~m].max()
+        reach += pos >= lo_frame
+        gaps.append(pos - lo_frame)
+    return f"{top}/{len(gaps)} / {reach}/{len(gaps)} / {np.median(gaps):.3f}" if gaps else "-"
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--margin", type=float, default=0.01, help="cutoff gap above the best 'no results' match")
+    ap.add_argument("--cache", default=str(HERE / "reports/tune-cache.json"), help="collected data; delete it to collect again")
+    ap.add_argument("--out", default=str(HERE / "tuned.toml"))
+    ap.add_argument("--drop", default="", help="golden case ids to leave out, e.g. to price an expectation")
+    cfg = ap.parse_args()
+    cfg.cache = pathlib.Path(cfg.cache)
+    cfg.url = os.environ.get("SUPERSPACE_QUERY_URL", "http://127.0.0.1:47801/v1/embeddings")
+    sock = os.environ.get("SUPERSPACE_SOCK") or os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "superspace.sock")
+    cfg.cache.parent.mkdir(parents=True, exist_ok=True)
+    data = json.loads(cfg.cache.read_text()) if cfg.cache.exists() else None  # with a cache, no daemon is needed
+    conn = None if data else bench.Conn(sock)
+    home = pathlib.Path(data["status"]["home"] if data else conn.call("status")["value"]["home"])
+    cases = [c for c in bench.CASES if ("want" in c or c.get("empty")) and not bench.missing_need(c, home) and c["id"] not in cfg.drop.split(",")]
+    data = data or collect(cfg, conn, cases)
+    ix = Index(pathlib.Path(data["status"]["state"]) / "index.sqlite")
+    name = lambda i: ix.items[i]["key"]
+    lines = [f"# Super Space tuning, {datetime.datetime.now():%Y-%m-%d %H:%M}", "",
+             f"{len(cases)} golden cases ({sum(1 for c in cases if c.get('empty'))} 'no results'), {len(ix.items)} items, "
+             f"{len(ix.V)} vectors ({ix.img.sum()} pictures), margin {cfg.margin}.",
+             f"Query embed: {data['embed_ms']['one']} ms alone, {data['embed_ms']['with_template']} ms with 'a photo of <q>' in the same request.", ""]
+    results = {}
+    for option in OPTIONS:
+        Ps, mu = prepare(ix, data, option)
+        for c in (c for c in cases if "want" in c):
+            P = Ps[c["q"]]
+            P.setdefault("mask", {})[c["id"]] = np.array([bench.matches(ix.items[i], c["want"]) for i in P["ids"]], bool)
+        if option == "plain":
+            for P in Ps.values():
+                featurize(P, CUTOFFS, option)
+            _, res = evaluate(cases, Ps, WEIGHTS)
+            by_q = {c["q"]: r for c, r in zip(cases, res)}
+            differ = [q for q, r in by_q.items() if [name(i) for i in r["top"][:1]] != data["live"][q][:1]]
+            lines += [f"Self-check, today's cutoffs and weights replayed: same top row as the live daemon for {len(by_q) - len(differ)}/{len(by_q)} queries."]
+            lines += [f"- differs: {q!r} live {data['live'][q][:2]}, replay {[name(i) for i in by_q[q]['top'][:2]]}" for q in differ]
+            before = metrics(cases, res)
+            held = []  # 2-fold check: fit on half the cases with an expected row (and every 'no results' one), score the other half
+            for fold in (0, 1):
+                fw = fit([c for i, c in enumerate(cases) if c.get("empty") or i % 2 == fold], Ps, cfg.margin, option)[1]
+                held += [r["rank"] == 1 for r in evaluate([c for i, c in enumerate(cases) if "want" in c and i % 2 != fold], Ps, fw)[1]]
+            lines.append(f"Held-out recall@1 (2-fold, plain): {sum(held) / len(held):.3f} over {len(held)} cases.")
+        lo, raw, why = bounds(cases, Ps, cfg.margin)
+        cut, w = fit(cases, Ps, cfg.margin, option)
+        res = evaluate(cases, Ps, w)[1]
+        results[option] = dict(cut=cut, w=w, res=res, m=metrics(cases, res), photo=photo_stats(cases, Ps, lo["frame"]),
+                               lo=lo, raw=raw, why=why, Ps=Ps, mu=mu)
+    r = results["plain"]
+    cut, w, Ps = r["cut"], r["w"], r["Ps"]
+    lines += ["", "## Plain (what the daemon does today)", "", f"Before: {before}", f"After: {r['m']}", "",
+              "| Cutoff | Today | Lowest allowed | Tuned | Set by the 'no results' query, item, cosine |", "|---|---|---|---|---|"]
+    lines += [f"| {k} | {CUTOFFS[k]} | {r['lo'][k]} | {cut[k]} | " + (f"{r['why'][k][0]!r}, {name(r['why'][k][1])}, {r['raw'][k]:.3f} |" if k in r["why"] else "none |")
+              for k in CUTOFFS]
+    lines += ["", "What each 'no results' query that sets a cutoff costs (refitted without it):", ""]
+    for q in sorted({q for q, _ in r["why"].values()}):
+        sub = [c for c in cases if c["q"] != q]
+        m = metrics(sub, evaluate(sub, Ps, fit(sub, Ps, cfg.margin, "plain")[1])[1])
+        lines.append(f"- without {q!r} (sets {', '.join(k for k, v in r['why'].items() if v[0] == q)}): recall@1 {m['recall@1']}, recall@5 {m['recall@5']}, golden pass {m['golden_pass']}")
+    lines += ["", "| Weight | Today | Tuned |", "|---|---|---|"] + [f"| {f} | {WEIGHTS[i]:g} | {w[i]:g} |" for i, f in enumerate(FEATURES)]
+    lines += ["", "## Photo options (each fitted the same way)", "",
+              "| Option | recall@1 | recall@5 | MRR | golden pass | frame cutoff | photo, generic weight | pictures alone: wanted beats other pictures / clears the cutoff bound / median gap |",
+              "|---|---|---|---|---|---|---|---|"]
+    for o, x in results.items():
+        lines.append(f"| {o}{f' (constant {x[chr(109) + chr(117)]})' if o == 'debias' else ''} | {x['m']['recall@1']} | {x['m']['recall@5']} | {x['m']['mrr']} | "
+                     f"{x['m']['golden_pass']} | {x['cut']['frame']} | {x['w'][F['photo']]:g}, {x['w'][F['generic']]:g} | {x['photo']} |")
+    lines += ["", "## Still failing with the tuned plain settings", ""]
+    for c, x in zip(cases, r["res"]):
+        if not x["ok"]:
+            P = Ps[c["q"]]
+            j = np.flatnonzero(P["mask"][c["id"]]) if "want" in c else []
+            best = f"; wanted best cosine text {P['ct'][j].max():.3f}, picture {P['ci'][j].max():.3f}, name {P['n'][j].max():.2f}, keyword {P['kw'][j].max():.2f}" if len(j) else ""
+            lines.append(f"- {c['id']} {c['q']!r}: rank {x['rank']} (want {'nothing' if c.get('empty') else '<= ' + str(c.get('rank', 1))}); top {[name(i) for i in x['top']]}{best}")
+    report = HERE / f"reports/tune-{datetime.datetime.now():%Y%m%d-%H%M%S}.md"
+    report.write_text("\n".join(lines) + "\n")
+    toml = [f"# tests/tune {datetime.datetime.now():%Y-%m-%d} on {data['status']['home']}: {len(cases)} golden cases, margin {cfg.margin}.",
+            f"# Before {before}", f"# After  {r['m']}", "# [cutoffs] goes into preferences.toml as is.", "[cutoffs]"]
+    toml += [f"{k} = {cut[k]}" for k in CUTOFFS]
+    toml += ["", "# Starting weights for search.rs DEFAULT_WEIGHTS (or weights.json); the daemon does not read this table.", "[weights]"]
+    toml += [f"{f} = {round(float(w[i]), 3)}" for i, f in enumerate(FEATURES)]
+    pathlib.Path(cfg.out).write_text("\n".join(toml) + "\n")
+    print("\n".join(lines[2:6]), f"\nBefore {before}\nAfter  {r['m']}\nreport: {report}\nwrote {cfg.out}")
+
+
+if __name__ == "__main__":
+    main()

@@ -9,8 +9,8 @@
 Environment: SUPERSPACE_SOCK (default $XDG_RUNTIME_DIR/superspace.sock),
 SUPERSPACE_BIN (CLI command, default `superspace`), SUPERSPACE_IPC (UI IPC
 command prefix, default `omarchy-shell superspace`), SUPERSPACE_HOME (the
-daemon's home when its status does not say), SUPERSPACE_UI_HOME (the desktop
-session's home, for the theme; default $HOME).
+daemon's home when its status does not say). The theme is read from the desktop
+user's real ~/.local/state/omarchy (SUPERSPACE_UI_HOME overrides it for the self-test).
 
 Writes tests/reports/<time>.md and .json; exit status 1 when anything failed.
 --themes a,b,c switches the live Omarchy theme to screenshot the UI under
@@ -22,6 +22,7 @@ import json
 import os
 import pathlib
 import platform
+import pwd
 import re
 import secrets
 import select
@@ -279,7 +280,8 @@ def golden(rep, conn, cfg):
         f = res["final"] or {}
         rows.append({"id": c["id"], "q": c["q"], "tags": c.get("tags", []), "ok": not probs, "why": "; ".join(probs), "rank": rank,
                      "t_instant_ms": res["t_instant"], "t_final_ms": res["t_final"], "daemon_timing": f.get("timing"),
-                     "empty": f.get("empty"), "answer": f.get("answer"), "top": [r.get("key") for r in local_rows(f)[:5]]})
+                     "empty": f.get("empty"), "answer": f.get("answer"), "top": [r.get("key") for r in local_rows(f)[:5]],
+                     "explain": explain_failure(conn, c, f) if probs and not c.get("answer") else None})
     n = len(ranks)
     rep.data["golden"] = rows
     rep.data["metrics"] = {
@@ -289,6 +291,21 @@ def golden(rep, conn, cfg):
         "mrr": round(sum(1 / r for r in ranks if r) / n, 3) if n else None,
     }
     rep.data["latency"] = {"instant_ms": inst, "final_ms": fin}
+
+
+def explain_failure(conn, c, final):
+    """Every signal behind the top row and up to two expected keys, to see why a case failed."""
+    want = c.get("want", {}).get("key", [])
+    keys = list(dict.fromkeys([r["key"] for r in local_rows(final)[:1]] + (want if isinstance(want, list) else [want])[:2]))
+    out = {}
+    for k in keys:
+        v = conn.call("explain", q=c["q"], key=k).get("value")
+        if isinstance(v, dict):
+            raw = v.get("raw", {})
+            out[k] = {"rank": v.get("rank"), "kept": v.get("kept"), "score": round(v.get("score", 0), 3), "why": v.get("why"),
+                      **{x: round(raw[x], 3) for x in ("cosine", "cutoff", "name", "bm25", "hub") if isinstance(raw.get(x), (int, float))},
+                      "features": {n: round(f["contribution"], 3) for n, f in v.get("features", {}).items()}}
+    return out
 
 
 def typing(rep, conn):
@@ -560,10 +577,15 @@ def ui(rep, conn, cfg):
         if (len(hits) if isinstance(hits, list) else hits or 0) < 2:
             rep.add("ui:key-Right-Left", False, skip=f"the top row has {hits} hits; Right/Left need 2")
         else:
-            ipc("key", "Right")
-            h = state().get("hit")
-            ipc("key", "Left")
-            step("key-Right-Left", h == 1 and state().get("hit") == 0, f"Right/Left should step hits 0 -> 1 -> 0, got {h} then {state().get('hit')}")
+            # Hits are stepped in drawn (page/time) order from the best one, hit 0;
+            # when the best is drawn last, Right cannot move, so try Left first.
+            for there, back in (("Right", "Left"), ("Left", "Right")):
+                ipc("key", there)
+                if (h := state().get("hit")) != 0:
+                    break
+            ipc("key", back)
+            step("key-Right-Left", h not in (0, None) and state().get("hit") == 0,
+                 f"{there} should move off the best hit (0) and {back} return to it; got {h} then {state().get('hit')}")
         ipc("key", "Escape")
         step("key-Escape", state().get("open") is False, "Escape did not close the search box")
         s, _ = open_and_wait("awkward")
@@ -613,8 +635,9 @@ def theme_lint(rep):
 
 
 def ui_home():
-    """The desktop session's home (where the theme lives), which can differ from the daemon's."""
-    return pathlib.Path(os.environ.get("SUPERSPACE_UI_HOME") or pathlib.Path.home())
+    """The desktop user's real home (where Omarchy keeps the current theme), never the
+    daemon's test home or $HOME; SUPERSPACE_UI_HOME is for the self-test's fake UI."""
+    return pathlib.Path(os.environ.get("SUPERSPACE_UI_HOME") or pwd.getpwuid(os.getuid()).pw_dir)
 
 
 def theme_colors():
@@ -637,7 +660,7 @@ def theme_now(rep, s, cfg):
         return
     want = theme_colors()
     got = {k: str(t.get(k) or "").lower()[:7] for k in want}
-    rep.add("theme:current", got == want, f"UI colours {got} differ from the current theme's menu colours {want}")
+    rep.add("theme:current", got == want, f"UI colours {got} differ from the current theme's menu colours {want} (from {ui_home()}/.local/state/omarchy)")
 
 
 def ppm(path):
@@ -723,6 +746,10 @@ def write_report(rep, cfg, started):
         lines += ["", "## Answers", "", "| Query | Output | OK |", "|---|---|---|"]
         lines += [f"| `{r['q']}` | {(r['answer'] or {}).get('output', '(none)')} | {'yes' if r['ok'] else 'NO: ' + r['why']} |" for r in answers]
     lines += ["", "## Failures", ""] + ([f"- **{c['check']}**: {c['why']}" for c in fails] or ["None."])
+    explained = [r for r in g if r.get("explain")]
+    if explained:
+        lines += ["", "## Explain for failing golden cases", "", "rank is 0-based among all rows; features are contributions (value x weight).", ""]
+        lines += [f"- {r['id']} `{k}`: {json.dumps(v, ensure_ascii=False)}" for r in explained for k, v in r["explain"].items()]
     lines += ["", "## Skipped", ""] + ([f"- {c['check']}: {c['skip']}" for c in skips] or ["None."])
     out = cfg.out / f"{started:%Y%m%d-%H%M%S}"
     out.with_suffix(".md").write_text("\n".join(lines) + "\n")
