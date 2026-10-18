@@ -40,7 +40,7 @@ FEATURES = ["name", "exact", "keyword", "meaning", "margin", "hub", "recency", "
 KINDS = FEATURES[12:21]
 WEIGHTS = np.array([1.0, 0.2, 0.3, 0.9, 0.25, 0.2, 0.05, 0.03, 0.08, 0.3, 1.0, 0.05,
                     0.05, 0.03, 0.3, 0.05, 0.25, 0, -0.02, -0.03, -0.02, 0, 0])
-CUTOFFS = {"app": 0.70, "setting": 0.70, "file": 0.68, "image": 0.67, "video": 0.705, "audio": 0.665, "clip": 0.715,
+CUTOFFS = {"app": 0.70, "setting": 0.70, "file": 0.68, "image": 0.67, "video": 0.705, "audio": 0.645, "clip": 0.715,
            "emoji": 0.705, "history": 0.75, "frame": 0.655, "name": 0.80}
 GENERIC_CAPTIONS = ["a photo", "an image", "a picture", "a screenshot"]
 SPAN, CANDIDATES, SHOWN = 0.15, 300, 29
