@@ -31,6 +31,9 @@ for a in codex gemini; do
 done
 printf '#!/bin/bash\necho "mise $*" >>%s\n[[ ($1 == which && $2 == codex) || ($1 == use && $4 == codex) ]] && exit 0\n[[ $1 == x && $2 == codex ]] && { shift 4; echo "codex-real $*" >>%s; exit 0; }\nexit 1\n' "$LOG" "$LOG" >"$STUBS/mise"
 chmod +x "$STUBS/mise"
+# Off PATH, as under systemd-run or a plain SSH command: fresh_home puts claude in
+# mise's shims and gemini's stub in ~/.local/bin.
+mkdir -p /tmp/away && mv "$STUBS/claude" "$STUBS/gemini" /tmp/away/
 printf '#!/bin/bash\nif [[ " $* " == *" -o "* ]]; then %s -w "curl-downloaded %%{size_download}\\n" "$@" >>%s; else exec %s "$@"; fi\n' "$CURL" "$LOG" "$CURL" >"$STUBS/curl"
 chmod +x "$STUBS/curl"
 export PATH=$STUBS:$PATH
@@ -59,6 +62,8 @@ fresh_home() {
   cp "$FIX/opencode.json" "$HOME/.config/opencode/opencode.json"
   echo 'prefer = ["keep me"]' >"$HOME/.config/superspace/preferences.toml"
   mkdir -p "$HOME/.claude/skills/omarchy"   # an unrelated skill that must survive
+  mkdir -p "$HOME/.local/share/mise/shims" "$HOME/.local/bin"
+  cp /tmp/away/claude "$HOME/.local/share/mise/shims/" && cp /tmp/away/gemini "$HOME/.local/bin/"
   # the plugin as `omarchy plugin add` leaves it: a git clone, no symlinks
   mkdir -p "$P" && tar -C "$REPO" --exclude=./target --exclude=./.git --exclude=./demo/corpus -cf - . | tar -C "$P" -xf -
   if [[ "${KEEP_MODELS:-1}" == 1 && -n "$(ls $WORK/keep 2>/dev/null)" ]]; then

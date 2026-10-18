@@ -11,9 +11,10 @@ It answers golden queries from tests/golden.json (an oracle, so a correct
 bench passes) and anything else by plain keyword search over text files in
 its home (so live add/delete works). SUPERSPACE_FAKE_FAULTS (comma list)
 breaks it on purpose, so `tests/run --self-test` can prove each check fails
-when it should: slow, no-instant, web-first, pad, wrong-locator, prefs-noop,
-parity, slow-index, ui-stuck. 'wait' is not a fault: finals come 300 ms late
-and say so in timing.wait_ms, as the real daemon's typing pause does.
+when it should: slow, no-instant, web-first, pad, wrong-locator (also the
+snippet), near-miss, thin-margin, prefs-noop, parity, slow-index, ui-stuck.
+'wait' is not a fault: finals come 300 ms late and say so in timing.wait_ms, as
+the real daemon's typing pause does.
 """
 import json
 import os
@@ -75,7 +76,8 @@ def oracle_rows(cases):
         kind = want.get("kind") or (key.split(":")[0] if not key.startswith("file:") else KIND_BY_EXT.get(pathlib.Path(key).suffix, "file"))
         rows.append({"key": key, "kind": kind, "title": example(want["title"]) if "title" in want else key.rsplit("/", 1)[-1],
                      "subtitle": "", "icon": "text-x-generic", "action": {"type": "open", "path": key, "locator": {}},
-                     "score": round(0.9 - 0.01 * len(rows), 3), "why": "meaning", "hits": hits})
+                     "score": round(0.9 - 0.01 * len(rows), 3), "why": "meaning", "hits": hits,
+                     "snippet": {"text": "" if "wrong-locator" in FAULTS else example(c.get("snippet", "")), "marks": []}})
     return rows
 
 
@@ -114,6 +116,8 @@ class Daemon:
         rows = oracle_rows([c for c in cases if "want" in c]) if cases else self.keyword(q)
         if "pad" in FAULTS and any(c.get("empty") for c in cases):
             rows = [dict(r, key=f"file:Documents/near-miss-{i}.md") for i, r in enumerate(oracle_rows(CASES[:3]))]
+        if "near-miss" in FAULTS and cases:
+            rows = rows + [dict(oracle_rows(CASES[:1])[0], key="history:https://x.com/near-miss", kind="history")]
         with self.lock:
             prefs = json.loads(json.dumps(self.prefs))
         for b in prefs["bury"]:
@@ -172,7 +176,8 @@ class Daemon:
             row = next((r for r in self.results(req["q"])[0] if r["key"] == req["key"]), None)
             if not row:
                 return send({"id": rid, "error": "not a result for that query"})
-            send({"id": rid, "value": {"score": row["score"], "name": 0.0, "keyword": 0.2, "meaning": row["score"] - 0.2, "picks": 0.0}})
+            m = 0.03 if "thin-margin" in FAULTS else 0.5  # x 0.15: how far the row's cosine clears its cutoff
+            send({"id": rid, "value": {"score": row["score"], "features": {"meaning": {"value": m, "contribution": m * 0.9}}}})
         elif op == "activate":
             send({"id": rid, "value": {"ok": True}})
         else:

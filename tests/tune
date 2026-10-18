@@ -23,7 +23,8 @@ and its query server (SUPERSPACE_QUERY_URL). Needs numpy; on the Pi:
    minus the query's similarity to the mean picture, plus a constant).
 
 Writes tests/tuned.toml (plain: what the daemon runs today) and
-tests/reports/tune-<time>.md. Locators (pages, moments) are not replayed.
+tests/reports/tune-<time>.md. Locators (pages, moments) are not replayed, nor the
+stricter rule under an answer card (no tuned case gets one).
 """
 import argparse, datetime, importlib.machinery, importlib.util, json, os, pathlib, sqlite3, time, urllib.request
 import numpy as np
@@ -37,10 +38,10 @@ _spec.loader.exec_module(bench)
 FEATURES = ["name", "exact", "keyword", "meaning", "margin", "hub", "recency", "fresh", "frecency", "prefix", "boost", "prefer",
             "app", "setting", "file", "image", "video", "audio", "clip", "emoji", "history", "photo", "generic"]
 KINDS = FEATURES[12:21]
-WEIGHTS = np.array([1.0, 0.2, 0.7, 0.9, 0.1, 0.2, 0.05, 0.03, 0.08, 0.3, 1.0, 0.05,
-                    0.05, 0.03, 0, 0, 0, 0, -0.02, -0.03, -0.02, 0, 0])
-CUTOFFS = {"app": 0.70, "setting": 0.70, "file": 0.64, "image": 0.64, "video": 0.64, "audio": 0.64, "clip": 0.64,
-           "emoji": 0.65, "history": 0.64, "frame": 0.68, "name": 0.80}
+WEIGHTS = np.array([1.0, 0.2, 0.3, 0.9, 0.25, 0.2, 0.05, 0.03, 0.08, 0.3, 1.0, 0.05,
+                    0.05, 0.03, 0.3, 0.05, 0.25, 0, -0.02, -0.03, -0.02, 0, 0])
+CUTOFFS = {"app": 0.70, "setting": 0.70, "file": 0.68, "image": 0.67, "video": 0.705, "audio": 0.665, "clip": 0.715,
+           "emoji": 0.705, "history": 0.75, "frame": 0.655, "name": 0.80}
 GENERIC_CAPTIONS = ["a photo", "an image", "a picture", "a screenshot"]
 SPAN, CANDIDATES, SHOWN = 0.15, 300, 29
 F = {f: i for i, f in enumerate(FEATURES)}
@@ -161,7 +162,7 @@ def prepare(ix, data, option):
         pos[ids] = np.arange(len(ids))
         p = pos[ix.item]
         P = {"ids": ids, "kind": ix.kind[ids], "recency": np.where(ix.mtime[ids] > 0, np.exp(-(now - ix.mtime[ids]) / (30 * 86400)), 0),
-             "fresh": np.exp(-(now - ix.added[ids]) / (3 * 86400))}
+             "fresh": np.exp(-(now - ix.added[ids]) / (3 * 86400)), "asks": asks(" ".join(q.split()).lower())}
         # Best text part, best picture part (as typed) and best picture part (with the photo option), per item.
         for name, score, flag in (("t", c, False), ("i", c, True), ("p", cp, True)):
             m = (p >= 0) & (ix.img == flag)
@@ -175,6 +176,12 @@ def prepare(ix, data, option):
         P["n"], P["exact"], P["kw"] = s[:, 0], s[:, 1] > 0, s[:, 2]
         out[q] = P
     return out, round(mu, 3)
+
+
+def asks(qn):
+    """search.rs: the query asks for emoji, or (asks_history) for browser history."""
+    return {"emoji": qn.startswith("emoji"),
+            "history": any(w in qn for w in ("history", "visited", "://", "www.")) or (" " not in qn and any(c in qn for c in "./"))}
 
 
 def featurize(P, cut, option):
@@ -201,7 +208,7 @@ def featurize(P, cut, option):
 
 
 def ordered(P, w):
-    """search.rs order(): top hit, then 0.1 score bands grouped by kind; the rows shown."""
+    """search.rs order() and search(): top hit, then 0.1 score bands grouped by kind, the caps and variety; the rows shown."""
     k = np.flatnonzero(P["kept"])
     if not len(k):
         return k
@@ -213,7 +220,21 @@ def ordered(P, w):
         group = np.zeros(len(KINDS), int)
         group[u[np.argsort(first)]] = np.arange(len(u))
         rest = rest[np.lexsort((ids[rest], -score[rest], group[kind[rest]], -np.floor(score[rest].astype(np.float32) * 10)))]
-    return k[np.concatenate((o[:1], rest))][:SHOWN]
+    o = k[np.concatenate((o[:1], rest))]
+    for kd, cap in (("emoji", 3), ("history", 2)):  # search(): at most 3 emoji and 2 history rows, unless they are all there is
+        m = P["kind"][o] == KINDS.index(kd)          # or the query asks for them
+        if not m.all() and not P["asks"][kd]:
+            o = o[~m | (np.cumsum(m) <= cap)]
+    # search()'s variety rule: at most 4 rows of one kind come before the best row of each other kind.
+    o, kinds = o.tolist(), P["kind"][o].tolist()
+    total, shown = len(set(kinds)), {}
+    for i in range(min(len(o), SHOWN)):
+        if len(shown) < total and shown.get(kinds[i], 0) >= 4:
+            j = next(j for j in range(i, len(o)) if kinds[j] not in shown)
+            o.insert(i, o.pop(j))
+            kinds.insert(i, kinds.pop(j))
+        shown[kinds[i]] = shown.get(kinds[i], 0) + 1
+    return np.array(o[:SHOWN], int)
 
 
 def evaluate(cases, Ps, w):

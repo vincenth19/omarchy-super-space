@@ -44,6 +44,8 @@ SECTIONS = ["golden", "budgets", "prefs", "parity", "live", "ui", "theme"]
 LEASE = "file:Documents/Home/apartment-lease-new-farm-2026.pdf"
 CV = "file:Documents/Career/sam-rivera-cv-2026.pdf"
 TYPED = ["apartment lease bond", "golden retriever", "wifi connect", "the venue costs", "100k idr in usd"]
+FRESH = ["receipts from the hardware store", "photos of the beach at sunset", "notes about fixing the bike"]  # + a nonce
+MEANING_SPAN = 0.15  # search.rs: cosine above the cutoff that counts as a full meaning match
 now = time.perf_counter
 
 
@@ -234,6 +236,8 @@ def check_case(c, res):
                 probs.append(why)
             if not (res["instant"] or {}).get("answer"):
                 probs.append("the answer came only in the final phase, not the instant one")
+    if "no_key" in c and (bad := [r["key"] for r in local if re.search(c["no_key"], r.get("key", ""))]):
+        probs.append(f"{len(bad)} rows that should not be there: {', '.join(bad[:3])}")
     if "want" in c:
         rank = next((i for i, r in enumerate(local, 1) if matches(r, c["want"])), None)
         allowed = c.get("rank", 1)
@@ -244,7 +248,9 @@ def check_case(c, res):
             probs.append(f"{describe(c['want'])} at rank {rank}, want <= {allowed}; above it: {above}")
         else:
             row = local[rank - 1]
-            for why in (locator_problem(row, c["at"]) if "at" in c else "", absent_problem(row, c["absent"]) if "absent" in c else ""):
+            snip = (row.get("snippet") or {}).get("text", "")
+            for why in (locator_problem(row, c["at"]) if "at" in c else "", absent_problem(row, c["absent"]) if "absent" in c else "",
+                        f"right row, but its snippet {snip[:80]!r} does not show {c['snippet']!r}" if "snippet" in c and not re.search(c["snippet"], snip) else ""):
                 if why:
                     probs.append(why)
     return probs, rank
@@ -279,6 +285,8 @@ def golden(rep, conn, cfg):
                 rep.add(f"rules:{c['id']}:{phase}", False, f"{c['q']!r}: " + "; ".join(rp))
         probs, rank = check_case(c, res)
         rep.add(name, not probs, f"{c['q']!r}: " + "; ".join(probs) if probs else "")
+        if rank and "demo" in c.get("tags", []) and (why := thin_margin(conn, c, local_rows(res["final"])[rank - 1])):
+            rep.data.setdefault("warnings", []).append(why)
         if "want" in c:
             ranks.append(rank)
         f = res["final"] or {}
@@ -296,7 +304,21 @@ def golden(rep, conn, cfg):
         "recall@5": round(sum(1 for r in ranks if r and r <= 5) / n, 3) if n else None,
         "mrr": round(sum(1 / r for r in ranks if r) / n, 3) if n else None,
     }
-    rep.data["latency"] = {"instant_ms": inst, "final_ms": fin}
+    # Never-searched queries, so the query server must embed them, as for most queries on stage.
+    fresh = [final_ms(r["t_final"], r["final"].get("timing")) for q in FRESH if (r := conn.search(f"{q} {secrets.token_hex(2)}"))["final"]]
+    rep.add("budget:final:fresh-queries", len(fresh) == len(FRESH) and max(fresh) < FINAL_P95_MS,
+            f"never-searched queries reached the final phase in {[round(x) for x in fresh]} ms, budget {FINAL_P95_MS} ms each"
+            " (is the query server slow, or something else busy?)")
+    rep.data["latency"] = {"instant_ms": inst, "final_ms": fin, "fresh_ms": fresh}
+
+
+def thin_margin(conn, c, row):
+    """A row kept on meaning alone that clears its cutoff by under 0.01: re-embedding could drop it."""
+    f = (conn.call("explain", q=c["q"], key=row["key"]).get("value") or {}).get("features", {})
+    m = f.get("meaning", {}).get("value", 0) * MEANING_SPAN
+    if 0 < m < 0.01 and not {"name", "exact", "keyword"} & f.keys():
+        return f"margin:{c['id']}: {row['key']} clears its meaning cutoff by only {m:.4f} for {c['q']!r}"
+    return ""
 
 
 def explain_failure(conn, c, final):
@@ -512,10 +534,10 @@ def live(rep, conn, cfg):
         rep.add("live", False, skip=f"no Documents folder in the daemon's home {home}")
         return
     if home.resolve() == pathlib.Path.home().resolve() and not cfg.allow_home_writes:
-        rep.add("live", False, skip="the daemon watches your real home; pass --allow-home-writes to let the bench write a file in ~/Documents")
+        rep.add("live", False, skip="the daemon watches your real home; pass --allow-home-writes to let the bench write in ~/Documents/superspace-bench-tmp")
         return
     token = "zqx" + secrets.token_hex(4)
-    rel = f"Documents/superspace-bench-{token}.md"
+    rel = f"Documents/superspace-bench-tmp/{token}.md"
     path, key = home / rel, "file:" + rel
 
     def wait(present, limit=10):
@@ -526,16 +548,20 @@ def live(rep, conn, cfg):
                 return now() - t0
             time.sleep(0.1)
         return None
+    path.parent.mkdir(exist_ok=True)
     try:
-        path.write_text(f"# Bench note\n\nThe {token} marmalade budget for the picnic is forty dollars.\n")
-        t_add = wait(True)
-        rep.add("live:add", t_add is not None and t_add < LIVE_S,
-                f"a new file became searchable after {t_add:.2f} s, budget {LIVE_S} s" if t_add is not None else f"a new file was not searchable after 10 s ({rel})")
+        try:
+            path.write_text(f"# Bench note\n\nThe {token} marmalade budget for the picnic is forty dollars.\n")
+            t_add = wait(True)
+            rep.add("live:add", t_add is not None and t_add < LIVE_S,
+                    f"a new file became searchable after {t_add:.2f} s, budget {LIVE_S} s" if t_add is not None else f"a new file was not searchable after 10 s ({rel})")
+        finally:
+            path.unlink(missing_ok=True)
+        t_del = wait(False)
+        rep.add("live:delete", t_del is not None and t_del < LIVE_S,
+                f"a deleted file disappeared after {t_del:.2f} s, budget {LIVE_S} s" if t_del is not None else "a deleted file was still a result after 10 s")
     finally:
-        path.unlink(missing_ok=True)
-    t_del = wait(False)
-    rep.add("live:delete", t_del is not None and t_del < LIVE_S,
-            f"a deleted file disappeared after {t_del:.2f} s, budget {LIVE_S} s" if t_del is not None else "a deleted file was still a result after 10 s")
+        path.parent.rmdir()
     rep.data["live"] = {"add_s": t_add, "delete_s": t_del}
 
 
@@ -752,6 +778,7 @@ def write_report(rep, cfg, started):
         lines += ["", "## Answers", "", "| Query | Output | OK |", "|---|---|---|"]
         lines += [f"| `{r['q']}` | {(r['answer'] or {}).get('output', '(none)')} | {'yes' if r['ok'] else 'NO: ' + r['why']} |" for r in answers]
     lines += ["", "## Failures", ""] + ([f"- **{c['check']}**: {c['why']}" for c in fails] or ["None."])
+    lines += ["", "## Warnings", ""] + ([f"- {w}" for w in rep.data.get("warnings", [])] or ["None."])
     explained = [r for r in g if r.get("explain")]
     if explained:
         lines += ["", "## Explain for failing golden cases", "", "rank is 0-based among all rows; features are contributions (value x weight).", ""]
@@ -783,9 +810,11 @@ def demo_table(rep):
     for c in fails:
         if not c["check"].startswith("golden:"):
             print(f"FAIL {c['check']}: {c['why'][:110]}")
-    lat = rep.data.get("latency") or {"instant_ms": [], "final_ms": []}
+    for w in rep.data.get("warnings", []):
+        print(f"WARN {w[:110]}")
+    lat = rep.data.get("latency") or {"instant_ms": [], "final_ms": [], "fresh_ms": []}
     print(f"{sum(r['ok'] for r in rows.values())}/{len(rows)} pass; p95 instant {ms(pct(lat['instant_ms'], 95))} ms"
-          f" (budget {INSTANT_MS}), final {ms(pct(lat['final_ms'], 95))} ms (budget {FINAL_P95_MS})")
+          f" (budget {INSTANT_MS}), final {ms(pct(lat['final_ms'], 95))} ms, never-searched {ms(max(lat['fresh_ms'], default=None))} ms (budget {FINAL_P95_MS})")
     return len(fails)
 
 
@@ -844,6 +873,8 @@ FAULTS = {  # fault -> regex one failed check must match; "" must pass everythin
     "web-first": r"^rules:",
     "pad": r"^golden:none-",
     "wrong-locator": r"^golden:demo-lease$",
+    "near-miss": r"^golden:demo-awkward$",
+    "thin-margin": r"^margin:demo-",
     "prefs-noop": r"^prefs:pin$",
     "parity": r"^parity:cli:",
     "slow-index": r"^live:add$",
@@ -887,14 +918,14 @@ def self_test(args):
                                          allow_home_writes=False, out=tmp / "reports")
                 t0 = now()
                 rep, path = run(cfg)
-                fails = [c["check"] for c in rep.failures() if not c["check"].startswith("theme:lint")]
+                fails = [c["check"] for c in rep.failures() if not c["check"].startswith("theme:lint")] + rep.data.get("warnings", [])
                 good = not fails if expect is None else any(re.search(expect, f) for f in fails)
                 if fault in ("", "wrong-locator"):  # --demo: every demo query in order, failing just the cases with a locator
                     p = subprocess.run([py, str(HERE / "run"), "--demo", "--sock", sock, "--out", str(tmp / "reports")], env=env, capture_output=True, text=True)
                     got = [(line[:4], line[5:41].rstrip()) for line in p.stdout.splitlines() if line[:4] in ("ok  ", "FAIL", "skip")]
                     demo = [c for c in CASES if "demo" in c.get("tags", [])]
                     good &= [q for _, q in got] == [c["q"][:36].rstrip() for c in demo] and p.returncode == (1 if fault else 0) and \
-                        [q for s, q in got if s == "FAIL"] == [c["q"][:36].rstrip() for c in demo if fault and "at" in c]
+                        [q for s, q in got if s == "FAIL"] == [c["q"][:36].rstrip() for c in demo if fault and ("at" in c or "snippet" in c)]
                 ok &= good
                 print(f"{'ok  ' if good else 'FAIL'} fault={fault or 'none':14} {len(fails):3} failures, {now() - t0:5.1f} s"
                       + ("" if good else f"  expected {expect or 'no failures'}; got: {fails[:8]}"))
@@ -914,7 +945,7 @@ def main():
     ap.add_argument("--home", help="the daemon's home, when its status does not report it")
     ap.add_argument("--themes", help="opt-in: switch the live theme to each of these and screenshot the UI")
     ap.add_argument("--ui-actions", action="store_true", help="also press Enter in the UI (opens a document)")
-    ap.add_argument("--allow-home-writes", action="store_true", help="let the live test write a file in your real ~/Documents")
+    ap.add_argument("--allow-home-writes", action="store_true", help="let the live test write in your real ~/Documents/superspace-bench-tmp (created and removed)")
     ap.add_argument("--out", default=str(HERE / "reports"))
     ap.add_argument("--demo", action="store_true", help="only the demo script's queries, in order, as one table: a check before going on stage")
     ap.add_argument("--self-test", action="store_true")
@@ -931,6 +962,8 @@ def main():
     fails = rep.failures()
     for c in fails:
         print(f"FAIL {c['check']}: {c['why']}")
+    for w in rep.data.get("warnings", []):
+        print(f"WARN {w}")
     m = rep.data.get("metrics") or {}
     print(f"{len(fails)} failed, {sum(c['ok'] for c in rep.checks)} passed, {sum(bool(c['skip']) for c in rep.checks)} skipped;"
           f" recall@1 {m.get('recall@1')} recall@5 {m.get('recall@5')} MRR {m.get('mrr')}")

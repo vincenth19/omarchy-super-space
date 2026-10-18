@@ -1,8 +1,12 @@
-# tests/tune 2026-10-18 on /home/omarchy/.cache/superspace-dev/home: 147 golden cases, margin 0.01.
-# Before {'recall@1': 0.906, 'recall@5': 0.984, 'mrr': 0.94, 'golden_pass': '135/147', 'no_results_empty': '13/19'}
-# After  {'recall@1': 0.906, 'recall@5': 0.945, 'mrr': 0.926, 'golden_pass': '140/147', 'no_results_empty': '19/19'}
-# Checked live on the Pi dev daemon with these values: recall@1 0.906, recall@5 0.945, MRR 0.926,
-# demo script 15/17, 'no results' 19/19 (the Before line is today's values, replayed).
+# tests/tune 2026-10-19 on the real Pi install's index (/home/omarchy, read-only copy), 144 golden cases, margin 0.01.
+# Before {'recall@1': 0.928, 'recall@5': 0.96, 'mrr': 0.943, 'golden_pass': '136/144', 'no_results_empty': '16/19'}
+# After  {'recall@1': 0.936, 'recall@5': 0.968, 'mrr': 0.951, 'golden_pass': '141/144', 'no_results_empty': '19/19'}
+# Checked live on a dev daemon over that copy with these values: recall@1 0.936, recall@5 0.968, MRR 0.951,
+# demo script 18/18, 'no results' 19/19 (Before is the real install today: demo 16/18).
+# frame: the tuner picked 0.66; 0.655 (the lowest the 'no results' queries allow) scores the same and keeps the
+# weekend video's best frame (0.660) clear of the cutoff by 0.005 instead of 0.0003.
+# history: was never tuned (no browser history in the dev corpus); the Pi's real Chromium history needs 0.695.
+# search.rs now uses 0.75 and shows at most 2 history rows, for room above real browsing; so does this file.
 # [cutoffs] goes into preferences.toml as is.
 [cutoffs]
 app = 0.7
@@ -13,8 +17,8 @@ video = 0.705
 audio = 0.665
 clip = 0.715
 emoji = 0.705
-history = 0.64
-frame = 0.68
+history = 0.75
+frame = 0.655
 name = 0.8
 
 # Starting weights for search.rs DEFAULT_WEIGHTS (or weights.json); the daemon does not read this table.
@@ -33,7 +37,7 @@ boost = 1.0
 prefer = 0.05
 app = 0.05
 setting = 0.03
-file = 0.2
+file = 0.3
 image = 0.05
 video = 0.25
 audio = 0.0
