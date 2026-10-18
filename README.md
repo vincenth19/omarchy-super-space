@@ -28,6 +28,26 @@ Prefer a terminal? `~/.config/omarchy/plugins/io.github.vincenth19.superspace/bi
 does the same setup there. Run `superspace-setup` again any time to repair or
 update, and `superspace-setup doctor` to check that each piece works.
 
+## The first index
+
+Seconds after setup finishes, everything on your computer can be found by
+name and keyword. Search by meaning fills in behind it, starting with what
+you use most, then the rest of your files, then photos, video and speech. The
+search box shows how far it has got, and so does `superspace-setup doctor`.
+
+How long meaning search takes to fill in, for a home like the demo's (about
+2,800 apps, settings, emoji, document sections and history entries, plus 50
+photos, videos and songs). These are estimates until they are measured:
+
+| | Raspberry Pi 5 | Recent laptop |
+|---|---|---|
+| Names and keywords | seconds | seconds |
+| Apps, settings and emoji | under a minute | seconds |
+| Documents (about 400 pages and sections) | about 10 minutes | 3 to 5 minutes |
+| Photos, video moments and speech | 5 to 10 minutes (about 4 s a photo) | 1 to 3 minutes (about 1 s a photo) |
+
+After that, a file you save is searchable within seconds.
+
 ## What runs in the background
 
 Three user services, nothing system-wide:
@@ -38,8 +58,6 @@ Three user services, nothing system-wide:
 | `superspace-embed` | the model for what you type, on 2 cores | normal, so a search never waits |
 | `superspace-embed-index` | the model for documents, photos and video frames | idle: only processor and disk time nothing else wants |
 
-Search by name and keyword works as soon as each file is read; meaning fills
-in behind it, text first, then photos, video and speech.
 `systemctl --user status 'superspace*'` shows the services and
 `journalctl --user -u superspace` their log.
 

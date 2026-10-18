@@ -11,7 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       # The models (about 870 MB), so a run downloads only the ones it deletes.
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: ~/setup-test/keep
           key: setup-models-1

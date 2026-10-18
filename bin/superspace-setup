@@ -291,6 +291,10 @@ doctor() {
   check "query model server healthy (port 47801)" curl -fsm 3 http://127.0.0.1:47801/health
   check "index model server healthy (port 47802)" curl -fsm 3 http://127.0.0.1:47802/health
   check "daemon answers a search" answers
+  # How far indexing has got; still indexing is not a failure.
+  timeout 10 "$SS" status --json 2>/dev/null | jq -r 'if .indexing or .pending + .media_queue > 0
+    then "  busy  indexing: \(.items) things findable by name, meaning search \(100 * .vectors / ([.vectors + .pending, 1] | max) | floor)% done (\(.pending) parts and \(.media_queue) media files left)"
+    else "  ok    index: \(.items) things, meaning search complete" end' 2>/dev/null || true
   check "speech to text runs (whisper.cpp $WHISPER_BUILD)" whisper_runs
   check "agent skill linked" skills_linked
   for a in "${AGENTS[@]}"; do

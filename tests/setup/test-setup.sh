@@ -41,6 +41,7 @@ cat >/tmp/superspace-dev <<'EOF'
 case $1 in
 '') echo "superspace: usage: superspace serve | search ..." >&2; exit 1 ;;
 search) [ -e /tmp/answering ] || { echo "superspace: cannot reach the daemon" >&2; exit 1; }; echo '{"rows":[{"key":"web:doctor"}],"empty":true}' ;;
+status) [ -e /tmp/answering ] && cat /tmp/status.json ;;
 *) echo superspace-dev "$@" ;;
 esac
 EOF
@@ -49,7 +50,7 @@ chmod +x /tmp/superspace-dev
 fresh_home() {
   # keep downloaded models between test sessions, wipe everything else
   mkdir -p $WORK/keep
-  [[ -d $HOME/.local/share/superspace/models ]] && cp -rn "$HOME/.local/share/superspace/models/." $WORK/keep/ 2>/dev/null
+  [[ -d $HOME/.local/share/superspace/models ]] && cp -r --update=none "$HOME/.local/share/superspace/models/." $WORK/keep/ 2>/dev/null
   rm -rf "$HOME"
   mkdir -p "$HOME/.config/hypr" "$HOME/.config/opencode" "$(dirname "$P")" \
     "$HOME/.agents/skills" "$HOME/.claude/skills" "$HOME/.codex/skills" "$HOME/.pi/agent/skills" "$HOME/.hermes/skills" \
@@ -79,7 +80,7 @@ t0=$(date +%s)
 rc1=${PIPESTATUS[0]}
 echo "run 1 took $(( $(date +%s) - t0 )) s"
 ok "run 1 exit 0" '[[ $rc1 == 0 ]]'
-mkdir -p $WORK/keep && cp -rn "$S/models/." $WORK/keep/
+mkdir -p $WORK/keep && cp -r --update=none "$S/models/." $WORK/keep/
 ok "binary installed" '[[ -x $S/bin/superspace && $($S/bin/superspace x) == "superspace-dev x" ]]'
 ok "llama-server present + build stamp" '[[ -x $S/llama/llama-server && $(cat $S/llama/.build) == b11718 ]]'
 ok "llama-server runs (--version)" '$S/llama/llama-server --version 2>&1 | grep -q "version: 11718\|b11718\|11718"'
@@ -251,6 +252,7 @@ mkdir -p /tmp/www && echo '{"status":"ok"}' >/tmp/www/health
 (cd /tmp/www && exec python3 -m http.server 47801 --bind 127.0.0.1) >/dev/null 2>&1 & Q=$!
 (cd /tmp/www && exec python3 -m http.server 47802 --bind 127.0.0.1) >/dev/null 2>&1 & I=$!
 sleep 1; touch /tmp/answering
+echo '{"items":2482,"vectors":1200,"pending":1554,"media_queue":12,"indexing":true}' >/tmp/status.json
 SSB=$HOME/.local/bin/superspace
 # what the real CLIs write (checked with claude, codex and gemini in a fake HOME)
 echo "{\"mcpServers\":{\"superspace\":{\"command\":\"$SSB\",\"args\":[\"mcp\"]}}}" >$HOME/.claude.json
@@ -260,11 +262,15 @@ cp $HOME/.claude.json $HOME/.copilot/mcp-config.json
 cat /tmp/doc1.out
 ok "doctor all ok: exit 0" '[[ $rcd1 == 0 ]] && ! grep -q FAIL /tmp/doc1.out'
 ok "doctor rows" '[[ $(grep -c "^  ok" /tmp/doc1.out) == 10 ]] && grep -q "MCP server registered with opencode" /tmp/doc1.out && ! grep -q gemini /tmp/doc1.out'
+ok "doctor shows indexing progress" 'grep -qxF "  busy  indexing: 2482 things findable by name, meaning search 43% done (1554 parts and 12 media files left)" /tmp/doc1.out'
+echo '{"items":2482,"vectors":2754,"pending":0,"media_queue":0,"indexing":false}' >/tmp/status.json
+ok "doctor shows a finished index" 'grep -qxF "  ok    index: 2482 things, meaning search complete" <("$SETUP" doctor)'
 kill $I; rm /tmp/answering $HOME/.claude.json; mv $S/whisper/whisper-cli /tmp/wcli; rm $HOME/.claude/skills/superspace
 "$SETUP" doctor >/tmp/doc2.out 2>&1; rcd2=$?
 cat /tmp/doc2.out
 ok "doctor failures: exit 1" '[[ $rcd2 == 1 ]] && grep -q "To repair: superspace-setup" /tmp/doc2.out'
 ok "doctor names each failure" 'for l in "index model server" "daemon answers" "speech to text" "agent skill" "MCP server registered with claude"; do grep -q "FAIL  $l" /tmp/doc2.out || exit 1; done'
+ok "doctor: no daemon, no progress line" '! grep -q "meaning search" /tmp/doc2.out'
 ok "doctor keeps the rest ok" 'for l in "superspace runs" "query model server" "MCP server registered with codex"; do grep -q "ok    $l" /tmp/doc2.out || exit 1; done'
 kill $Q; mv /tmp/wcli $S/whisper/whisper-cli
 "$SETUP" --binary /tmp/superspace-dev >/dev/null 2>&1
