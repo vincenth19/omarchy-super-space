@@ -18,7 +18,7 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 /// The other crates, through their public functions only (fakes under test).
 #[cfg(not(test))]
 pub mod ext {
-    pub use ss_files::{crawl, crawl_dir, doc as file_doc, roots, wanted_in};
+    pub use ss_files::{crawl, crawl_dir, doc as file_doc, icon, roots, wanted_in};
     pub use ss_media::{doc as media_doc, forget, is_media, lrc_owner, quick_doc, stamp as media_stamp};
     pub use ss_sources::{apps, clips, emoji, history, settings, track_clip_sources, watch_paths};
 
@@ -192,7 +192,7 @@ fn index_file(d: &Daemon, p: &Path, known: Option<&String>, batch: &mut Vec<(Doc
             && let Some(doc) = ext::quick_doc(p, &d.cfg.home, &d.cfg.cache)
         {
             let stamp = doc.stamp.clone();
-            batch.push((Doc { key, ..doc }, stamp, mtime));
+            batch.push((Doc { key, icon: media_icon(p, &doc.icon), ..doc }, stamp, mtime));
         }
         d.media.lock().unwrap().insert(p.to_path_buf());
         d.media_cv.notify_all();
@@ -201,6 +201,11 @@ fn index_file(d: &Daemon, p: &Path, known: Option<&String>, batch: &mut Vec<(Doc
     {
         batch.push((Doc { key, ..doc }, stamp, mtime));
     }
+}
+
+/// A media row's icon: its thumbnail, else the icon of the app that opens it (DESIGN "Icons").
+fn media_icon(p: &Path, icon: &str) -> String {
+    if Path::new(icon).is_absolute() { icon.to_string() } else { ext::icon(p) }
 }
 
 fn index_all(d: &Daemon, files: &[PathBuf], known: &HashMap<String, String>) {
@@ -338,7 +343,7 @@ fn media_loop(d: Arc<Daemon>) {
         };
         if let Some(doc) = doc {
             let (stamp, mtime) = (doc.stamp.clone(), file_stamp(&p).map_or(0, |s| s.1));
-            if let Err(e) = d.store.put(vec![(Doc { key, ..doc }, stamp, mtime)]) {
+            if let Err(e) = d.store.put(vec![(Doc { key, icon: media_icon(&p, &doc.icon), ..doc }, stamp, mtime)]) {
                 eprintln!("superspace: indexing {}: {e:#}", p.display());
             }
             d.wake_embedder();

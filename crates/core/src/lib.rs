@@ -197,6 +197,9 @@ pub struct Timing {
     pub instant_ms: f32,
     pub embed_ms: f32,
     pub total_ms: f32,
+    /// How long the final phase waited for typing to pause; total_ms minus this is the work done.
+    #[serde(default)]
+    pub wait_ms: f32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

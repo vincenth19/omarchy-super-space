@@ -31,11 +31,11 @@ pub struct QVecs {
 /// letters 0.7-0.79). Measured with EmbeddingGemma 2 Q8_0 on a small corpus:
 /// files matching 0.66-0.79, unrelated 0.45-0.625; Omarchy's short app and
 /// setting labels sit near everything (unrelated up to 0.69, matches 0.67-0.78);
-/// photos 0.72-0.80 against 0.50-0.62. Starting points for the test bench to tune; `[cutoffs]`
-/// in preferences.toml overrides any of them.
+/// photos 0.72-0.80 against 0.50-0.62. Tuned by tests/tune on the demo corpus (tests/tuned.toml,
+/// 18 Oct); `[cutoffs]` in preferences.toml overrides any of them.
 pub const CUTOFFS: &[(&str, f32)] = &[
-    ("app", 0.70), ("setting", 0.70), ("file", 0.64), ("image", 0.64), ("video", 0.64), ("audio", 0.64),
-    ("clip", 0.64), ("emoji", 0.65), ("history", 0.64), ("frame", 0.68), ("name", 0.80),
+    ("app", 0.70), ("setting", 0.70), ("file", 0.68), ("image", 0.67), ("video", 0.705), ("audio", 0.665),
+    ("clip", 0.715), ("emoji", 0.705), ("history", 0.64), ("frame", 0.68), ("name", 0.80),
 ];
 
 pub const NF: usize = 23;
@@ -51,10 +51,10 @@ pub const FEATURES: [&str; NF] = [
     "name", "exact", "keyword", "meaning", "margin", "hub", "recency", "fresh", "frecency", "prefix", "boost", "prefer",
     "app", "setting", "file", "image", "video", "audio", "clip", "emoji", "history", "photo", "generic",
 ];
-/// Starting weights (the bench fits better ones; picks then adjust them per user).
+/// Starting weights, fitted by tests/tune (tests/tuned.toml); picks then adjust them per user.
 pub const DEFAULT_WEIGHTS: [f32; NF] = [
-    1.0, 0.2, 0.7, 0.9, 0.1, 0.2, 0.05, 0.03, 0.08, 0.3, 1.0, 0.05,
-    0.05, 0.03, 0.0, 0.0, 0.0, 0.0, -0.02, -0.03, -0.02, 0.0, 0.0,
+    1.0, 0.2, 0.3, 0.9, 0.25, 0.2, 0.05, 0.03, 0.08, 0.3, 1.0, 0.05,
+    0.05, 0.03, 0.2, 0.05, 0.25, 0.0, -0.02, -0.03, -0.02, 0.0, 0.0,
 ];
 const KINDS: [Kind; 9] =
     [Kind::App, Kind::Setting, Kind::File, Kind::Image, Kind::Video, Kind::Audio, Kind::Clip, Kind::Emoji, Kind::History];
@@ -97,7 +97,9 @@ pub struct Sig {
     /// Cosine of the best matching picture to the generic captions.
     pub generic: Option<f32>,
     hits: Vec<H>,
-    snip: Option<i64>,
+    /// Parts for the snippet, best first: the row shows the first with text
+    /// (a document's overview part has none).
+    snip: Vec<i64>,
 }
 
 #[derive(Clone)]
@@ -240,7 +242,7 @@ pub fn rank(d: &Daemon, mem: &Mem, q: &str, qv: Option<&QVecs>, extra: Option<i6
     let prefs = d.prefs.read().unwrap();
     let w = *d.weights.read().unwrap();
     let prefer = d.prefer.read().unwrap();
-    let qn = norm(q);
+    let (qn, toks) = (norm(q), tokens(q));
     let now = now();
     let names = names(mem, q);
     let mut kw: HashMap<i64, Vec<(i64, f32)>> = HashMap::new();
@@ -330,15 +332,13 @@ pub fn rank(d: &Daemon, mem: &Mem, q: &str, qv: Option<&QVecs>, extra: Option<i6
         s.pinned = pins.contains(it.key.as_str());
         s.excluded = prefs.exclude.iter().any(|r| rule_hits(r, it, &d.cfg.home));
         s.kept = !s.excluded && (f[NAME] > 0.0 || f[KEYWORD] > 0.0 || f[MEANING] + f[PHOTO] > 0.0 || f[PREFIX] > 0.0 || s.pinned);
-        s.hits = hits(mem, it, &above, kparts);
-        let text_part = |pid: &&i64| mem.parts.get(pid).is_some_and(|p| p.image.is_none());
-        let mut by_meaning: Vec<_> = above.iter().collect();
+        s.hits = hits(mem, it, &above, kparts, &toks);
+        let mut by_meaning: Vec<_> = above.iter().filter(|x| mem.parts.get(x.0).is_some_and(|p| p.image.is_none())).collect();
         by_meaning.sort_by(|a, b| b.1.total_cmp(a.1));
-        let meaning_snip = by_meaning.iter().map(|x| x.0).find(text_part).copied();
         let kw_snip = kparts.and_then(|v| v.first()).map(|p| p.0);
         s.snip = match s.why(&w) {
-            Why::Meaning => meaning_snip.or(kw_snip),
-            _ => kw_snip,
+            Why::Meaning => by_meaning.iter().map(|x| *x.0).chain(kw_snip).collect(),
+            _ => kw_snip.into_iter().collect(),
         };
         out.push((id, s));
     }
@@ -362,38 +362,45 @@ pub fn rank(d: &Daemon, mem: &Mem, q: &str, qv: Option<&QVecs>, extra: Option<i6
 }
 
 /// A row's jump points: parts above the cutoff (neighbouring frames merged
-/// into one moment), else keyword-matched parts. Only parts with somewhere to
-/// jump to (a locator or a picture).
-fn hits(mem: &Mem, it: &Item, above: &HashMap<i64, f32>, kw: Option<&Vec<(i64, f32)>>) -> Vec<H> {
+/// into one moment), keyword-matched parts (pictures only when nothing matched
+/// by meaning: their keywords are just the title) and sheets the query names.
+/// Named parts first, then parts matching by keyword and meaning, by meaning,
+/// by keyword. Only parts with somewhere to jump to (a locator or a picture).
+fn hits(mem: &Mem, it: &Item, above: &HashMap<i64, f32>, kw: Option<&Vec<(i64, f32)>>, toks: &[String]) -> Vec<H> {
     // Photos and video frames show their small thumbnail; other pictures (image clips) themselves.
     let media = matches!(it.kind, Kind::Image | Kind::Video);
     let thumb = |img: &String| if media { ss_media::thumb(Path::new(img)).display().to_string() } else { img.clone() };
     let h = |pid: i64, score: f32| H { loc: mem.parts[&pid].locator.clone(), score, part: pid, thumb: mem.parts[&pid].image.as_ref().map(thumb) };
-    let mut out = Vec::new();
-    if above.is_empty() {
-        out.extend(kw.into_iter().flatten().map(|&(pid, s)| h(pid, s)));
-    } else {
-        let mut run: Vec<i64> = Vec::new();
-        let flush = |run: &mut Vec<i64>, out: &mut Vec<H>| {
-            let Some(&best) = run.iter().max_by(|a, b| above[a].total_cmp(&above[b])) else { return };
-            let (first, last) = (&mem.parts[&run[0]].locator, &mem.parts[run.last().unwrap()].locator);
-            let loc = Locator { t: first.t, t_end: last.t_end.or(last.t).filter(|_| run.len() > 1).or(first.t_end), ..first.clone() };
-            out.push(H { loc, ..h(best, above[&best]) });
-            run.clear();
-        };
-        for &pid in &it.parts {
-            let Some(pm) = mem.parts.get(&pid) else { continue };
-            match (pm.image.is_some(), above.contains_key(&pid)) {
-                (true, true) => run.push(pid),
-                (true, false) => flush(&mut run, &mut out),
-                (false, true) => out.push(h(pid, above[&pid])),
-                (false, false) => {}
+    let kw: HashMap<i64, f32> = kw.into_iter().flatten().copied().collect();
+    let named = |pid: i64| mem.parts[&pid].locator.sheet.as_deref().map(tokens).is_some_and(|s| !s.is_empty() && s.iter().all(|t| toks.contains(t)));
+    let (mut out, mut run) = (Vec::new(), Vec::new());
+    let flush = |run: &mut Vec<i64>, out: &mut Vec<H>| {
+        let Some(&best) = run.iter().max_by(|a, b| above[a].total_cmp(&above[b])) else { return };
+        let (first, last) = (&mem.parts[&run[0]].locator, &mem.parts[run.last().unwrap()].locator);
+        let loc = Locator { t: first.t, t_end: last.t_end.or(last.t).filter(|_| run.len() > 1).or(first.t_end), ..first.clone() };
+        out.push(H { loc, ..h(best, above[&best]) });
+        run.clear();
+    };
+    for &pid in &it.parts {
+        let Some(pm) = mem.parts.get(&pid) else { continue };
+        let b = kw.get(&pid).copied();
+        match (pm.image.is_some(), above.get(&pid)) {
+            (true, Some(_)) => run.push(pid),
+            (true, None) => {
+                flush(&mut run, &mut out);
+                out.extend(b.filter(|_| above.is_empty()).map(|b| h(pid, b)));
             }
+            (false, Some(&c)) => out.push(h(pid, c)),
+            (false, None) => out.extend(b.or(named(pid).then_some(0.0)).map(|b| h(pid, b))),
         }
-        flush(&mut run, &mut out);
     }
+    flush(&mut run, &mut out);
     out.retain(|x| x.thumb.is_some() || x.loc != Locator::default());
-    out.sort_by(|a, b| b.score.total_cmp(&a.score));
+    let tier = |x: &H| {
+        let (n, m) = (named(x.part), above.contains_key(&x.part));
+        (n, (n || kw.contains_key(&x.part)) && m, m)
+    };
+    out.sort_by(|a, b| tier(b).cmp(&tier(a)).then(b.score.total_cmp(&a.score)));
     out.truncate(8);
     out
 }
@@ -452,7 +459,7 @@ fn make_row(c: &Connection, it: &Item, s: &Sig, toks: &[String], w: &[f32; NF]) 
         .iter()
         .map(|h| Hit { locator: h.loc.clone(), score: h.score, text: clip(&part_text(c, h.part), 140), thumb: h.thumb.clone() })
         .collect();
-    let snippet = s.snip.map(|p| snippet(&part_text(c, p), toks)).filter(|x| !x.text.is_empty());
+    let snippet = s.snip.iter().map(|&p| snippet(&part_text(c, p), toks)).find(|x| !x.text.is_empty());
     let mut action = it.action.clone();
     if let (Action::Open { locator, .. }, Some(h)) = (&mut action, hits.first()) {
         *locator = h.locator.clone();
@@ -563,7 +570,7 @@ pub fn explain(d: &Daemon, q: &str, key: &str) -> Result<Value> {
         .map(|(i, n)| (n.to_string(), json!({"value": s.f[i], "weight": w[i], "contribution": s.f[i] * w[i]})))
         .collect();
     let it = &mem.items[&id];
-    let best = s.snip.map(|p| d.store.read(|c| Ok(clip(&part_text(c, p), 300))).unwrap_or_default());
+    let best = d.store.read(|c| Ok(s.snip.iter().map(|&p| clip(&part_text(c, p), 300)).find(|t| !t.is_empty()))).unwrap_or_default();
     Ok(json!({
         "key": key, "title": it.title, "kind": it.kind, "q": q,
         "rank": shown.iter().position(|r| r.key == key), "shown": shown.len(), "empty": empty,

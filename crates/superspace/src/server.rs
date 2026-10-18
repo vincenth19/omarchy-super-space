@@ -142,6 +142,8 @@ impl Daemon {
     }
 
     pub fn search_response(&self, s: &Search, phase: Phase, instant_ms: f32) -> Response {
+        // A final phase starts after the pause for typing (CALM): the time since the instant phase.
+        let wait_ms = if phase == Phase::Final { (s.t0.elapsed().as_secs_f32() * 1000.0 - instant_ms).max(0.0) } else { 0.0 };
         let (qv, embed_ms) = match phase {
             Phase::Instant => (None, 0.0),
             Phase::Final => {
@@ -153,7 +155,7 @@ impl Daemon {
         let answer = ss_answers::answer(&s.q, self.rates.read().unwrap().as_ref(), now(), &self.tz);
         let total_ms = s.t0.elapsed().as_secs_f32() * 1000.0;
         let instant_ms = if phase == Phase::Instant { total_ms } else { instant_ms };
-        Response::Search { id: s.id, phase, rows, answer, empty, timing: Timing { instant_ms, embed_ms, total_ms } }
+        Response::Search { id: s.id, phase, rows, answer, empty, timing: Timing { instant_ms, embed_ms, total_ms, wait_ms } }
     }
 
     /// Every request except the two phases of a search on a connection.

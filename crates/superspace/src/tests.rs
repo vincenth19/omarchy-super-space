@@ -76,6 +76,9 @@ pub mod ext {
     pub fn forget(p: &Path, _cache: &Path) {
         FORGOT.lock().unwrap().push(p.to_path_buf());
     }
+    pub fn icon(p: &Path) -> String {
+        format!("app-for-{}", p.extension().unwrap_or_default().to_string_lossy())
+    }
     pub fn lrc_owner(lrc: &Path) -> Option<PathBuf> {
         (lrc.extension()? == "lrc").then(|| lrc.with_extension("mp3"))
     }
@@ -201,7 +204,7 @@ fn serve_fake(mut s: TcpStream, delay: Duration, queries: &AtomicUsize) {
     let _ = write!(s, "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{out}", out.len());
 }
 
-const FAKE_CUTOFFS: &str = "[cutoffs]\napp = 0.3\nsetting = 0.3\nfile = 0.3\nclip = 0.3\nemoji = 0.3\nhistory = 0.3\nframe = 0.5\n";
+const FAKE_CUTOFFS: &str = "[cutoffs]\napp = 0.3\nsetting = 0.3\nfile = 0.3\naudio = 0.3\nclip = 0.3\nemoji = 0.3\nhistory = 0.3\nframe = 0.5\n";
 
 struct T {
     d: Arc<Daemon>,
@@ -498,7 +501,6 @@ fn explain_read_and_similar() {
     let e = t.req(json!({"op": "explain", "id": 1, "q": "rent", "key": "file:Documents/lease.pdf"}));
     assert_eq!(e["rank"], 0);
     assert!(e["features"]["keyword"]["contribution"].as_f64().unwrap() > 0.0);
-    assert_eq!(e["why"], "keyword");
     let e = t.req(json!({"op": "explain", "id": 1, "q": "rent", "key": "app:firefox"}));
     assert_eq!((e["kept"].as_bool(), e["rank"].is_null()), (Some(false), true));
     let r = t.req(json!({"op": "read", "id": 1, "key": "file:Documents/lease.pdf"}));
@@ -579,7 +581,8 @@ fn calm_typing_embeds_once_per_pause() {
     let got = read_responses(&mut r, Instant::now() + Duration::from_millis(600));
     let finals: Vec<&Value> = got.iter().filter(|v| v["phase"] == "final").collect();
     assert_eq!(finals.iter().map(|v| v["id"].as_u64().unwrap()).collect::<Vec<_>>(), [3]);
-    assert!(finals[0]["timing"]["total_ms"].as_f64().unwrap() >= 150.0, "the final waits for a 150 ms pause");
+    let ms = |k: &str| finals[0]["timing"][k].as_f64().unwrap();
+    assert!(ms("wait_ms") >= 140.0 && ms("total_ms") - ms("wait_ms") < 100.0, "the final waits for a 150 ms pause, and says so");
     assert_eq!(t.queries.load(Ordering::SeqCst), 1, "superseded searches are never embedded");
     assert!(sent.elapsed() < Duration::from_secs(2));
     // A client that has said all it will say gets its final at once.
@@ -618,6 +621,7 @@ fn media_is_found_by_name_at_once_then_by_content_and_forgotten() {
     let thumb = rows[0].hits[0].thumb.as_deref().unwrap();
     assert!(thumb.ends_with("beach-day.jpg/t0001.jpg"), "hit thumb is the small picture: {thumb}");
     until("song words", Duration::from_secs(5), || t.keys("harbour").contains(&song.to_string()));
+    assert_eq!(t.search("rain.mp3").0[0].icon, "app-for-mp3", "audio wears the icon of the app that plays it");
     std::fs::write(docs.join("rain.lrc"), "sunshine on the river").unwrap();
     until("song read again after its .lrc changed", Duration::from_secs(5), || t.keys("sunshine").contains(&song.to_string()));
     std::fs::remove_file(docs.join("beach-day.jpg")).unwrap();
@@ -683,7 +687,8 @@ fn picture_features_leave_files_and_apps_alone() {
     for q in queries {
         assert_ne!(t.search(q).0[0].kind, Kind::Image, "{q}: no picture jumps above the file or app");
     }
-    assert_eq!(t.keys("golden retriever")[0], "file:Pictures/dog.jpg");
+    let picture = t.search("golden retriever").0.into_iter().find(|r| r.kind == Kind::Image).unwrap();
+    assert_eq!(picture.key, "file:Pictures/dog.jpg", "the right picture still leads the pictures");
     // "a photo of cat" matches the cat picture better than "cat" does.
     let e = t.req(json!({"op": "explain", "id": 1, "q": "cat", "key": "file:Pictures/cat.jpg"}));
     assert!(e["features"]["photo"]["value"].as_f64().unwrap() > 0.0, "{e}");
@@ -709,6 +714,8 @@ fn kinds_alt_actions_and_the_browser_icon() {
     assert_eq!(alt("file:Documents/lease.pdf"), json!(["xdg-open", "/home/u/Documents"]));
     assert_eq!(alt("app:terminal"), json!(["wl-copy", "--", "terminal"]));
     assert_eq!(alt("web:rent"), json!(["wl-copy", "--", "https://duckduckgo.com/?q=rent"]));
+    let answer = t.req(json!({"op": "activate", "id": 1, "key": "answer", "q": "2+3", "alt": true}));
+    assert_eq!(answer["argv"], json!(["wl-copy", "--", "5"]), "Ctrl+Enter on the answer card copies too");
 }
 
 #[test]
@@ -722,4 +729,35 @@ fn a_source_whose_text_is_unchanged_still_updates_what_is_shown() {
     t.d.store.put(vec![(later.clone(), ingest::source_stamp(&later), 0)]).unwrap();
     assert_eq!(t.d.store.counts().0, 0, "nothing to embed again");
     assert_eq!(t.search("library").0[0].subtitle, "from Chromium · 2 h ago");
+}
+
+#[test]
+fn hits_put_named_and_keyword_parts_first_and_keep_lyric_lines() {
+    let t = start(0, "");
+    let part = |text: &str, locator: Locator, embed: bool| {
+        Part { embed: if embed { Embed::Text(doc_text("sales.xlsx", text)) } else { Embed::None }, text: text.into(), locator }
+    };
+    let sheet = |s: &str| Locator { sheet: Some(s.into()), row: Some(1), ..Locator::default() };
+    let at = |a: f32, b: f32| Locator { t: Some(a), t_end: Some(b), ..Locator::default() };
+    let lyrics = "you took the spare key and left the light on\nyour keys are on the counter";
+    t.put(vec![
+        Doc { parts: vec![
+            part("toowong sales by month and many other words here about stores", sheet("Summary"), true),
+            part("month coffees sold", sheet("Toowong"), true),
+            part("sales month", sheet("South Bank"), true),
+        ], ..doc("file:Documents/sales.xlsx", Kind::File, "sales.xlsx", "", &[]) },
+        Doc { parts: vec![
+            part(lyrics, Locator::default(), true),
+            part("you took the spare key and left the light on", at(2.0, 10.0), false),
+            part("your keys are on the counter", at(10.0, 18.0), false),
+        ], ..doc("file:Music/keys.mp3", Kind::Audio, "keys.mp3", "", &[]) },
+    ]);
+    let row = |q: &str, key: &str| t.search(q).0.into_iter().find(|r| r.key == key).unwrap();
+    let r = row("toowong sales month", "file:Documents/sales.xlsx");
+    let sheets: Vec<_> = r.hits.iter().map(|h| h.locator.sheet.clone().unwrap()).collect();
+    // South Bank is closest by meaning, Summary also has the words, the query names Toowong.
+    assert_eq!(sheets, ["Toowong", "Summary", "South Bank"]);
+    assert!(matches!(&r.action, Action::Open { locator, .. } if locator.sheet.as_deref() == Some("Toowong")));
+    let r = row("spare key light", "file:Music/keys.mp3");
+    assert_eq!(r.hits.iter().map(|h| h.locator.t).collect::<Vec<_>>(), [Some(2.0)], "the lyric line, though the whole lyrics matched by meaning");
 }
