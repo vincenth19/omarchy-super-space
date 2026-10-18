@@ -28,9 +28,16 @@ Column {
 
   spacing: Style.spacing.md
 
+  // EPUB parts carry their chapter as the page.
+  readonly property bool epub: /\.epub$/i.test(item.key || "")
+
+  // A hit's place: m:ss (h:mm:ss from an hour on), page or chapter, slide, sheet row, line.
   function where(l) {
-    if (l.t !== undefined) return Math.floor(l.t / 60) + ":" + ("0" + Math.floor(l.t % 60)).slice(-2)
-    if (l.page) return "p. " + l.page
+    if (l.t !== undefined) {
+      var s = Math.floor(l.t), two = function(n) { return ("0" + n).slice(-2) }
+      return (s < 3600 ? Math.floor(s / 60) : Math.floor(s / 3600) + ":" + two(Math.floor(s / 60) % 60)) + ":" + two(s % 60)
+    }
+    if (l.page) return (epub ? "ch. " : "p. ") + l.page
     if (l.slide) return "slide " + l.slide
     if (l.sheet) return l.sheet + (l.row ? " · row " + l.row : "")
     if (l.line) return "line " + l.line

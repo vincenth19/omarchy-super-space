@@ -7,7 +7,8 @@ It never skips a stale final phase, so the UI's drop-stale-ids path is used.
 
 Canned queries (substring match, case-insensitive):
   lease / contract / pdf      PDF hit with pages and marked snippet
-  dog / golden / park         video with moments + thumbs, photo, audio
+  novel / epub                EPUB hit with chapters
+  dog / golden / park         video with moments + thumbs, photo, audio (one moment past an hour)
   awkward / smile / emoji     emoji rows
   cm / usd / idr / % / 2+2    instant answer (plus whatever else matches)
   qwxz / nothing              empty: true, only the web row
@@ -107,6 +108,13 @@ def respond(q, thumbs):
                    {"type": "open", "path": home + "/Documents/rental-notes.docx", "locator": {}}, 0.6, "meaning",
                    marked("Questions for the landlord before signing the lease", words))
         return [pdf, web(q)], [final, docx, web(q)], answer, False, delay
+    if any(w in s for w in ("novel", "epub")):
+        epub = row("file:Documents/harbour-novel.epub", "file", "harbour-novel.epub", "~/Documents", "x-office-document",
+                   {"type": "open", "path": home + "/Documents/harbour-novel.epub", "locator": {"page": 3}}, 0.7, "meaning",
+                   marked("The lighthouse keeper rowed out to the harbour at dawn.", words),
+                   [{"locator": {"page": 3}, "score": 0.7, "text": "The lighthouse keeper rowed out to the harbour at dawn."},
+                    {"locator": {"page": 11}, "score": 0.66, "text": "Back at the harbour, the storm had passed."}])
+        return [epub, web(q)], [epub, web(q)], answer, False, delay
     if any(w in s for w in ("dog", "golden", "park", "retriever")):
         t = thumbs or [""]
         moments = [{"locator": {"t": tt, "t_end": tt + 4.0}, "score": sc, "text": "", "thumb": t[i % len(t)]}
@@ -116,11 +124,11 @@ def respond(q, thumbs):
                     hits=moments)
         photo = row("file:Pictures/golden1.jpg", "image", "golden1.jpg", "~/Pictures · 12 Oct", t[0] or "image-x-generic",
                     {"type": "open", "path": home + "/Pictures/golden1.jpg", "locator": {}}, 0.74, "meaning")
-        audio = row("file:Music/park-walk.mp3", "audio", "park-walk.mp3", "~/Music · spoken at 1:05, 3:20", "audio-x-generic",
+        audio = row("file:Music/park-walk.mp3", "audio", "park-walk.mp3", "~/Music · spoken at 1:05, 1:02:05", "audio-x-generic",
                     {"type": "open", "path": home + "/Music/park-walk.mp3", "locator": {"t": 65.0}}, 0.6, "meaning",
                     marked("…and then the golden retriever ran across the whole park…", words),
                     [{"locator": {"t": 65.0, "t_end": 80.0}, "score": 0.6, "text": "the golden retriever ran across the whole park"},
-                     {"locator": {"t": 200.0, "t_end": 215.0}, "score": 0.55, "text": "we took the dog home after the park"}])
+                     {"locator": {"t": 3725.0, "t_end": 3740.0}, "score": 0.55, "text": "we took the dog home after the park"}])
         return [web(q)], [video, photo, audio, web(q)], answer, False, delay
     if any(w in s for w in ("awkward", "smile", "emoji")):
         emoji = [("😬", "grimacing face", "awkward, nervous"), ("😅", "grinning face with sweat", "phew, relief"),
@@ -187,7 +195,7 @@ class Handler(socketserver.StreamRequestHandler):
                 instant, final, answer, empty, delay = respond(q, self.server.thumbs)
                 ms = (time.perf_counter() - t0) * 1000
                 base = {"id": rid, "empty": empty, **({"answer": answer} if answer else {})}
-                send({**base, "phase": "instant", "rows": instant, "timing": {"instant_ms": ms, "embed_ms": 0, "total_ms": ms}})
+                send({**base, "empty": empty or all(r["kind"] == "web" for r in instant), "phase": "instant", "rows": instant, "timing": {"instant_ms": ms, "embed_ms": 0, "total_ms": ms}})
                 threading.Timer(delay, send, [{**base, "phase": "final", "rows": final,
                                                "timing": {"instant_ms": ms, "embed_ms": delay * 1000, "total_ms": delay * 1000}}]).start()
                 log(self.server, {"search": q, "id": rid})

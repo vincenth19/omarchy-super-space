@@ -49,6 +49,7 @@ Item {
   function close() {
     opened = false
     field.text = ""
+    if (progress && progress.step === "ready") progress = null
   }
 
   // ------------------------------------------------------------ daemon
@@ -81,31 +82,34 @@ Item {
     triggeredOnStart: true
     onRunningChanged: tries = 0
     onTriggered: {
-      if (++tries === 2 && !setup.started) {
-        setup.started = true
-        setup.running = true
-      }
+      if (++tries === 6) setup.running = true
       link.active = false
       link.active = true
     }
   }
 
-  // Still no daemon a second after opening: run the plugin's setup and show
-  // its progress (DESIGN.md "Setup"), once a session. Its JSON lines are
-  // {step, message} or {step: "download", file, done, total}; "ask-bind" means
-  // it left Super+Space alone, so the box asks.
+  // Still no daemon five seconds after opening: run the plugin's setup and
+  // show its progress (DESIGN.md "Setup"), unless superspace.service is up and
+  // merely slow. Setup runs as a systemd unit of its own, so closing the box,
+  // a plugin reload or a shell restart never kills it mid-download; this
+  // follows the JSON lines it writes to a file (and picks a running one back
+  // up): {step, message} or {step: "download", file, done, total}; "ask-bind"
+  // means it left Super+Space alone, so the box asks.
   readonly property string pluginDir: decodeURIComponent(String(Qt.resolvedUrl(".")).replace(/^file:\/\//, ""))
   property var progress: null   // setup's last line
   property bool askBind: false
 
   Process {
     id: setup
-    property bool started: false
-    command: [root.pluginDir + "bin/superspace-setup", "--progress"]
+    command: ["sh", "-c", `systemctl --user -q is-active superspace.service && exit
+      systemctl --user -q is-active superspace-setup.service || { : >"$1"
+        systemd-run --user -q --collect -u superspace-setup -p StandardOutput=append:"$1" -p StandardError=journal "$0" --progress; }
+      exec tail -F -n +1 "$1" 2>/dev/null`, root.pluginDir + "bin/superspace-setup", Quickshell.env("XDG_RUNTIME_DIR") + "/superspace-setup.jsonl"]
     stdout: SplitParser {
       onRead: function(line) {
         try { root.progress = JSON.parse(line) } catch (e) { return }
         if (root.progress.step === "ask-bind") root.askBind = true
+        if (root.progress.step === "ready" || root.progress.step === "error") setup.running = false
       }
     }
   }
@@ -127,7 +131,11 @@ Item {
   function receive(line) {
     var msg
     try { msg = JSON.parse(line) } catch (e) { return }
-    if (msg.id === seq && Array.isArray(msg.rows)) show(msg)
+    if (msg.id !== seq || !Array.isArray(msg.rows)) return
+    // An instant phase with nothing local and no answer leaves the rows on
+    // screen until the final phase: no empty flash mid-word.
+    if (msg.phase === "instant" && !msg.answer && msg.rows.every(function(r) { return r.kind === "web" })) return
+    show(msg)
   }
 
   // Hits are listed best first; they are shown and stepped in document or
@@ -186,21 +194,13 @@ Item {
     return !current ? (answer ? answer.copy : "") : a.path || a.url || a.text || current.title
   }
 
-  function activate(i) {
-    if (i < offset) { copy(answer.copy); return close() }
-    var row = rows[i - offset]
+  // The daemon runs it; alt (Ctrl+Enter) is the alternative: show in folder, or copy.
+  function activate(i, alt) {
+    var row = i < offset ? { key: "answer" } : rows[i - offset]
     if (!row) return
-    var request = { op: "activate", id: seq + 1, key: row.key, q: field.text, hit: (row.hits || []).length ? (i === sel ? hit : 0) : null }
+    var request = { op: "activate", id: seq + 1, key: row.key, q: field.text, hit: (row.hits || []).length ? (i === sel ? hit : 0) : null, alt: !!alt }
     activated = request
     send(request)
-    close()
-  }
-
-  // Ctrl+Enter: show a file in its folder; anything else, copy it.
-  function alternate() {
-    var path = current && current.action ? current.action.path : ""
-    if (path) Quickshell.execDetached(["xdg-open", path.slice(0, path.lastIndexOf("/")) || "/"])
-    else copy(copyText())
     close()
   }
 
@@ -212,7 +212,7 @@ Item {
     else if (key === Qt.Key_Escape) close()
     else if (key === Qt.Key_Down || (ctrl && key === Qt.Key_N)) move(1)
     else if (key === Qt.Key_Up || (ctrl && key === Qt.Key_P)) move(-1)
-    else if (enter) ctrl ? alternate() : activate(sel)
+    else if (enter) activate(sel, ctrl)
     else if (key === Qt.Key_Right || key === Qt.Key_Left) return stepHit(key === Qt.Key_Right ? 1 : -1)
     else if (key === Qt.Key_Tab) expanded = !expanded && !!current && (current.hits || []).length > 0
     else if (ctrl && key >= Qt.Key_1 && key <= Qt.Key_9) activate(offset + key - Qt.Key_1)
@@ -313,6 +313,8 @@ Item {
           font.family: Style.font.menuFamily
           font.pixelSize: Style.font.display
           onTextChanged: root.search(text)
+          // Like Spotlight: another window taking the keyboard closes the box.
+          onActiveFocusChanged: if (!activeFocus && root.opened) root.close()
           Keys.onPressed: function(event) { if (root.press(event.key, event.modifiers)) event.accepted = true }
 
           Text {
@@ -335,13 +337,14 @@ Item {
 
         Text {
           readonly property var p: root.progress || ({})
-          readonly property bool setupShown: !root.connected && !!root.progress
+          // Setup's progress, until the box is used for searching.
+          readonly property bool setupShown: !!root.progress && (!root.connected || !field.text.trim())
           visible: setupShown || (field.text.trim() !== "" && (!root.connected || (root.nothing && !root.rows.length)))
           width: parent.width
           leftPadding: Style.spacing.rowPaddingX
           rightPadding: Style.spacing.rowPaddingX
           text: setupShown ? (p.file ? "Downloading " + p.file + (p.total ? " · " + Math.floor(p.done * 100 / p.total) + "% of " + Math.round(p.total / 1048576) + " MB" : "") : p.message || "")
-                : root.connected ? "Nothing on this computer matches" : "Super Space is not running (superspace.service)"
+                : root.connected ? "Nothing on this computer matches" : "Waiting for Super Space (superspace.service)…"
           textFormat: Text.PlainText
           wrapMode: Text.Wrap
           color: p.step === "error" ? Color.urgent : Color.menu.text

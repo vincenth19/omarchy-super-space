@@ -3,14 +3,21 @@
 `SuperSpace.qml` (repo root) is an Omarchy 4 `menu` plugin, kept loaded so it
 opens instantly. `ui/ResultRow.qml` draws a result, `ui/AnswerCard.qml` an
 instant answer. It talks to `superspace serve` over one socket,
-`$XDG_RUNTIME_DIR/superspace.sock` (DESIGN.md "Protocol"), and runs nothing
-itself except `wl-copy` (Ctrl+C, Enter on an answer) and `xdg-open` (Ctrl+Enter
-on a file, to show its folder).
+`$XDG_RUNTIME_DIR/superspace.sock` (DESIGN.md "Protocol"). Every result,
+answers included, runs through the daemon (`activate`, with `"alt": true` for
+Ctrl+Enter); the UI itself only runs `wl-copy` for Ctrl+C. Like Spotlight, it
+closes on Esc, on a click outside the box, and when another window takes the
+keyboard.
 
-With no daemon a second after opening, it runs the plugin's
-`bin/superspace-setup --progress` once a session, shows its progress, and on
+With no daemon five seconds after opening, and superspace.service not active
+(a daemon that is merely slow is left alone), it starts the plugin's
+`bin/superspace-setup --progress` as the systemd unit `superspace-setup`, so
+nothing in the shell can kill it mid-download, and follows the JSON lines it
+writes to `$XDG_RUNTIME_DIR/superspace-setup.jsonl` (a box opened again picks
+a running setup back up). It shows each step and download progress, and on
 `ask-bind` asks "Make Super+Space open Super Space?" (Enter yes, which runs
-`superspace-setup bind`; Esc no; only while the query is empty).
+`superspace-setup bind`; Esc no; only while the query is empty), then setup's
+"ready" line until the box closes.
 
 Open it (the plugin binds no key until then):
 
@@ -33,7 +40,7 @@ Basilica.
 ## Keys
 
 Type to search · ↑/↓ or Ctrl+N/P move · Enter open (on an answer: copy) ·
-Ctrl+Enter show in folder, or copy · ←/→ step through a row's pages or
+Ctrl+Enter the alternative (show in folder, or copy) · ←/→ step through a row's pages or
 moments (with fewer than two, they move the text cursor) · Tab list a row's
 hits · Ctrl+1…9 open row N · Ctrl+C copy the answer, path or URL (copies the
 selected text if there is any) · Ctrl+U clear · Esc close.
@@ -54,7 +61,7 @@ over SSH set `XDG_RUNTIME_DIR` and `OMARCHY_PATH`.) `state` returns:
 {"open":true,"query":"lease","connected":true,"phase":"final",
  "selected":0,"selectedKey":"file:Documents/lease-2026.pdf","hit":0,"expanded":false,
  "empty":false,"answer":null,"rows":[{"key":"…","kind":"file","title":"…","hits":3},…],
- "activated":{"op":"activate","id":10,"key":"…","q":"lease","hit":1},
+ "activated":{"op":"activate","id":10,"key":"…","q":"lease","hit":1,"alt":false},
  "perf":[["instant",3],["final",4]],"setup":null,"askBind":false,
  "theme":{"background":"#1e1913","text":"#ebe1cc"}}
 ```
@@ -64,6 +71,12 @@ over SSH set `XDG_RUNTIME_DIR` and `OMARCHY_PATH`.) `state` returns:
 `activated` is the last `activate` sent; `perf` is the UI's own time per
 applied response (ms, model update and layout) since it opened; `setup` is
 setup's last progress line; `theme` the menu colours the UI draws with.
+
+Hits are labelled p. N (ch. N in an EPUB, whose parts are chapters), slide N,
+sheet · row N, line N, or a time as m:ss (h:mm:ss from an hour on). While
+typing, an instant phase with nothing local and no answer leaves the rows on
+screen until the final phase, the selection stays on the same key, and
+"Nothing on this computer matches" shows only after a final phase.
 
 ←/→ step through hits in the order they are drawn (page, slide, line or time),
 starting from the best one, so after Right `hit` is the index of the next
@@ -79,7 +92,7 @@ clear that cache (`Qt.clearComponentCache` does not exist in QML on Qt 6.11).
 python3 ui/dev/mock_daemon.py [--sock PATH] [--thumbs DIR] [--log FILE]
 ```
 
-Python stdlib only; canned two-phase answers for `lease`, `golden retriever`,
+Python stdlib only; canned two-phase answers for `lease`, `novel` (EPUB chapters), `golden retriever`,
 `awkward`, `5'11" in cm`, `qwxz` (empty), `slow <query>` (final after 1.5 s)
 and app/setting prefixes. It refuses to start when something already listens
 on the socket, and removes the socket on exit only if it is still its own.
