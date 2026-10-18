@@ -3,13 +3,18 @@
 `SuperSpace.qml` (repo root) is an Omarchy 4 `menu` plugin, kept loaded so it
 opens instantly. `ui/ResultRow.qml` draws a result, `ui/AnswerCard.qml` an
 instant answer. It talks to `superspace serve` over one socket,
-`$XDG_RUNTIME_DIR/superspace.sock` (DESIGN.md "Protocol"). Every result,
+`$XDG_RUNTIME_DIR/superspace.sock` or, as for the daemon, `$SUPERSPACE_SOCK`
+(DESIGN.md "Protocol"). Every result,
 answers included, runs through the daemon (`activate`, with `"alt": true` for
 Ctrl+Enter); the UI itself only runs `wl-copy` for Ctrl+C. Like Spotlight, it
 closes on Esc, on a click outside the box, and when another window takes the
 keyboard.
 
-With no daemon five seconds after opening, and superspace.service not active
+When the plugin loads and `~/.local/share/superspace/bin/superspace` does
+not exist (setup never ran), the box opens by itself and starts setup at once,
+so `omarchy plugin add … --enable` is the only command; this happens once per
+plugin load, and never when the binary exists. Otherwise, with no daemon five
+seconds after opening, and superspace.service not active
 (a daemon that is merely slow is left alone), it starts the plugin's
 `bin/superspace-setup --progress` as the systemd unit `superspace-setup`, so
 nothing in the shell can kill it mid-download, and follows the JSON lines it
@@ -74,9 +79,11 @@ setup's last progress line; `theme` the menu colours the UI draws with.
 
 Hits are labelled p. N (ch. N in an EPUB, whose parts are chapters), slide N,
 sheet · row N, line N, or a time as m:ss (h:mm:ss from an hour on). While
-typing, an instant phase with nothing local and no answer leaves the rows on
-screen until the final phase, the selection stays on the same key, and
-"Nothing on this computer matches" shows only after a final phase.
+typing, the list never shrinks: an instant phase's rows go on top of the last
+final phase's other rows (and its answer stays when the instant phase has
+none) until the next final phase replaces the whole list. The selection stays
+on the same key, and "Nothing on this computer matches" shows only after a
+final phase, until a row arrives.
 
 ←/→ step through hits in the order they are drawn (page, slide, line or time),
 starting from the best one, so after Right `hit` is the index of the next
@@ -94,5 +101,6 @@ python3 ui/dev/mock_daemon.py [--sock PATH] [--thumbs DIR] [--log FILE]
 
 Python stdlib only; canned two-phase answers for `lease`, `novel` (EPUB chapters), `golden retriever`,
 `awkward`, `5'11" in cm`, `qwxz` (empty), `slow <query>` (final after 1.5 s)
-and app/setting prefixes. It refuses to start when something already listens
+and app/setting prefixes. Point a dev shell at it with `SUPERSPACE_SOCK=PATH`
+when the real daemon has the default socket. It refuses to start when something already listens
 on the socket, and removes the socket on exit only if it is still its own.

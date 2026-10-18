@@ -27,7 +27,8 @@ Item {
   property string phase: ""
   property var answer: null
   property var rows: []
-  property bool empty: false
+  property var settled: ({ rows: [] })  // the last final phase; an instant phase only adds rows on top of it
+  property bool empty: false    // "Nothing on this computer matches": a final phase said so and no row came since
   property int sel: 0           // 0 is the answer card when there is one
   property string selKey: ""    // the key the selection stays on as responses arrive
   property int hit: 0           // the selected row's picked hit, an index into its hits
@@ -37,8 +38,6 @@ Item {
   readonly property int offset: answer ? 1 : 0
   readonly property var current: sel >= offset ? rows[sel - offset] || null : null
   readonly property string selectedKey: current ? current.key : answer ? "answer" : ""
-  // "Nothing on this computer matches" only once the final phase says so, never mid-word.
-  readonly property bool nothing: empty && phase === "final"
 
   function open(payloadJson) {
     perf = []
@@ -62,7 +61,7 @@ Item {
     id: link
     sourceComponent: Socket {
       id: socket
-      path: Quickshell.env("XDG_RUNTIME_DIR") + "/superspace.sock"
+      path: Quickshell.env("SUPERSPACE_SOCK") || Quickshell.env("XDG_RUNTIME_DIR") + "/superspace.sock"
       connected: true
       parser: SplitParser { onRead: function(line) { root.receive(line) } }
       onConnectionStateChanged: {
@@ -115,6 +114,17 @@ Item {
   }
   Process { id: bind; command: [root.pluginDir + "bin/superspace-setup", "bind"] }
 
+  // Setup never ran (no daemon binary): open by itself and start setup, so
+  // `omarchy plugin add … --enable` is the only command. Checked once per
+  // plugin load, never for a daemon that is merely slow. It cannot loop:
+  // setup's first step installs the binary, setup writes nothing in the
+  // plugin folder (no reload), and the setup command never starts a second one.
+  Process {
+    running: true
+    command: ["test", "-e", Quickshell.env("HOME") + "/.local/share/superspace/bin/superspace"]
+    onExited: function(code) { if (code) { root.open("{}"); setup.running = true } }
+  }
+
   function send(request) {
     if (!connected) return false
     sock.write(JSON.stringify(request) + "\n")
@@ -125,17 +135,13 @@ Item {
   function search(q) {
     seq += 1
     if (!q.trim() || !send({ op: "search", id: seq, q: q }))
-      show({ id: seq, phase: "", rows: [], empty: false })
+      show({ phase: "", rows: [] })
   }
 
   function receive(line) {
     var msg
     try { msg = JSON.parse(line) } catch (e) { return }
-    if (msg.id !== seq || !Array.isArray(msg.rows)) return
-    // An instant phase with nothing local and no answer leaves the rows on
-    // screen until the final phase: no empty flash mid-word.
-    if (msg.phase === "instant" && !msg.answer && msg.rows.every(function(r) { return r.kind === "web" })) return
-    show(msg)
+    if (msg.id === seq && Array.isArray(msg.rows)) show(msg)
   }
 
   // Hits are listed best first; they are shown and stepped in document or
@@ -145,14 +151,20 @@ Item {
     return hits.map(function(h, i) { return i }).sort(function(a, b) { return at(hits[a]) - at(hits[b]) })
   }
 
+  // The list never shrinks while typing: an instant phase puts its rows on top
+  // of the last final phase's other rows (and that answer, if it has none),
+  // and the next final phase replaces them all.
   function show(msg) {
     var started = Date.now(), keep = selKey
-    var web = msg.rows.filter(function(r) { return r.kind === "web" })
-    var all = msg.rows.filter(function(r) { return r.kind !== "web" }).concat(web)
+    if (msg.phase !== "instant") settled = msg
+    var local = function(r) { return r.kind !== "web" }
+    var keys = msg.rows.map(function(r) { return r.key })
+    var all = msg.rows.filter(local).concat(settled.rows.filter(function(r) { return local(r) && keys.indexOf(r.key) < 0 }))
+    empty = settled.empty === true && !all.length
+    all = all.concat(msg.rows.filter(function(r) { return !local(r) }))
     all.forEach(function(r) { r._order = order(r.hits || []) })
-    answer = msg.answer || null
+    answer = msg.answer || settled.answer || null
     rows = all
-    empty = msg.empty === true
     phase = msg.phase
     var found = keep === "answer" ? (answer ? 0 : -1) : rows.findIndex(function(r) { return r.key === keep })
     if (found < 0) { sel = 0; hit = 0; expanded = false }
@@ -339,7 +351,7 @@ Item {
           readonly property var p: root.progress || ({})
           // Setup's progress, until the box is used for searching.
           readonly property bool setupShown: !!root.progress && (!root.connected || !field.text.trim())
-          visible: setupShown || (field.text.trim() !== "" && (!root.connected || (root.nothing && !root.rows.length)))
+          visible: setupShown || (field.text.trim() !== "" && (!root.connected || (root.empty && !root.rows.length)))
           width: parent.width
           leftPadding: Style.spacing.rowPaddingX
           rightPadding: Style.spacing.rowPaddingX
@@ -393,7 +405,7 @@ Item {
             selected: index + root.offset === root.sel
             hit: selected ? root.hit : 0
             expanded: selected && root.expanded
-            notice: root.nothing && modelData.kind === "web"
+            notice: root.empty && modelData.kind === "web"
             onClicked: root.activate(index + root.offset)
           }
         }
