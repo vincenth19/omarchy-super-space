@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.vincenth19.superspace",
+  "name": "Super Space",
+  "version": "0.1.0",
+  "author": "Vincent H",
+  "description": "Spotlight that understands meaning, fully local: apps, settings, files and the text inside them, photos, video moments, spoken words, clipboard, emoji and instant answers",
+  "license": "MIT",
+  "homepage": "https://github.com/vincenth19/omarchy-super-space",
+  "kinds": ["menu"],
+  "keepLoaded": true,
+  "entryPoints": { "menu": "SuperSpace.qml" }
+}
