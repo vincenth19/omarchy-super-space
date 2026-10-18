@@ -126,6 +126,27 @@ else `xdg-open`); audio/video at the moment (`mpv --start=T`); apps via
 5. Order: answer card (separate field) · top hit · then by score with gentle
    kind grouping · web row last, always.
 
+### Learned scorer (decided 18 Oct)
+
+The final order is a weighted sum of ~15 features per row: name score, BM25,
+cosine, cosine margin over the next row and over the item's hub score, kind,
+modified-recency, frecency, picks for the typed prefix, preference boosts,
+similarity to `prefer` sentences. Starting weights are fitted on the bench;
+every activation then updates the user's weights online (pairwise: the picked
+row beats the rows shown above it), with picks decaying over a few weeks and a
+short freshness boost for new items so habits cannot bury them. Weights live
+in `~/.local/state/superspace/weights.json`; `explain` shows each feature's
+contribution. A cross-encoder (Qwen3-Reranker-0.6B, top 5, after typing
+pauses) ships only if it beats this on the bench.
+
+### Setup (decided 18 Oct)
+
+`omarchy plugin add <repo> --enable` is the only command. On first open, with
+no daemon socket, the search box starts setup itself (a Process running
+`bin/superspace-setup --progress`, which writes JSON progress lines), shows
+download progress inline, asks once whether Super+Space should open Super
+Space, and switches to search when the daemon answers. No sudo, no terminal.
+
 ## Preferences (`~/.config/superspace/preferences.toml`)
 
 Hot reloaded; the same edits are available as `Pref` requests, CLI
@@ -222,7 +243,25 @@ highlighted words, and for media a strip of moment thumbnails on a timeline.
 Keys: type to search · ↑/↓ or Ctrl+N/P move · Enter open · Ctrl+Enter
 alternative (reveal in folder / copy path) · ←/→ step through a row's hits
 (pages, moments) · Tab expand a row's hits · Ctrl+1…9 open row N · Ctrl+C
-copy answer or path · Esc close. Follows the Omarchy theme colours.
+copy answer or path · Esc close.
+
+Calm while typing (decided 18 Oct, after watching it type): the instant
+phase still updates on every keystroke, but rows keep their place and the
+selection stays on the same key; the daemon starts the meaning search only
+after 150 ms with no newer query on that connection, so the final phase
+arrives once per pause, not once per letter; the previous rows stay until new
+ones arrive (never an empty flash); "Nothing on this computer matches" shows
+only after a final phase, never mid-word; no fade-out/fade-in between updates.
+
+Icons: apps use their own icon; files use the icon of the app that opens
+their mime type on this machine (`xdg-mime query default`); the web row uses
+the default browser's icon (`xdg-settings get default-web-browser`).
+
+Theme-agnostic: every colour, font, radius and transparency comes from
+Omarchy's shell theme (the same tokens Omarchy's own launcher and menus use,
+which every theme sets through `colors.toml`/`shell.toml`). No hard-coded
+colours or fonts, light themes included. The UI tests screenshot it under the
+default theme, a light theme and a third-party theme (basilica).
 
 ## Demo-ready means
 
