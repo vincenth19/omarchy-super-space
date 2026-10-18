@@ -36,6 +36,9 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes
+      # The notes start with each binary's sha256, for checking a download by hand.
+      - run: |
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes \
+            --notes "$(echo '```'; cat dist/*.sha256; echo '```')"
         env:
           GH_TOKEN: ${{ github.token }}

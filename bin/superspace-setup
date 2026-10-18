@@ -37,6 +37,9 @@ HF_VAD=https://huggingface.co/ggml-org/whisper-vad/resolve/9ffd54a1e1ee413ddf265
 MODEL=embeddinggemma-2-Q8_0.gguf
 MMPROJ=mmproj-embeddinggemma-2-Q8_0.gguf
 AGENTS=(claude codex gemini copilot opencode)
+# Omarchy installs agents with mise. systemd-run and a plain SSH command can
+# lack the PATH a login shell has, so look in mise's shims and ~/.local/bin too.
+PATH=$PATH:$HOME/.local/share/mise/shims:$HOME/.local/bin
 
 # say STEP MESSAGE: {"step": …, "message": …} with --progress, else the message.
 say() {
@@ -133,7 +136,7 @@ install_stt() {
 answers() { timeout 10 "$SS" search doctor --json 2>/dev/null | jq -e '.rows | length > 0' >/dev/null; }
 
 # Installed for real, not just Omarchy's install-on-first-run stub (running a
-# stub would install the agent).
+# stub would install the agent). A mise shim is a link to mise, so mise decides.
 real() {
   local p
   p=$(command -v "$1") || return 1

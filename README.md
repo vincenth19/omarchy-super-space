@@ -100,8 +100,17 @@ Super Space matches it.
 Everything runs on your computer: the index, the model and the search. The
 model servers listen on 127.0.0.1 only. Nothing leaves the machine except two
 opt-in fetches: exchange rates for currency answers (Frankfurter/ECB, twice a
-day) and the "Search the web" row when you choose it. Setup downloads its
-files from GitHub and Hugging Face, checked against pinned checksums.
+day) and the "Search the web" row when you choose it.
+
+Setup downloads from GitHub and Hugging Face. llama.cpp, whisper.cpp and the
+models are checked against checksums pinned in the plugin. The daemon is
+checked against the checksum in its GitHub release (also in the release
+notes): that catches a broken download, not a release someone has replaced.
+
+Your coding agents can search everything the box can, clipboard and browser
+history included. To keep either out of the index, for you and your agents
+alike, add `[[exclude]]` with `kind = "clip"` or `kind = "history"` to your
+preferences, or run `superspace pref exclude clip`.
 
 Hidden files and folders are never indexed, nor is any folder containing a
 `.noindex`, `.nomedia` or `CACHEDIR.TAG` file.
