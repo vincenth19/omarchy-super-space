@@ -281,9 +281,12 @@ Opens instantly on Super+Space (keepLoaded menu plugin). One list:
 answer card on top, then rows with app icon, title, subtitle, snippet with
 highlighted words, and for media a strip of moment thumbnails on a timeline.
 Keys: type to search · ↑/↓ or Ctrl+N/P move · Enter open · Ctrl+Enter
-alternative (reveal in folder / copy path) · ←/→ step through a row's hits
-(pages, moments) · Tab expand a row's hits · Ctrl+1…9 open row N · Ctrl+C
-copy answer or path · Esc close.
+alternative (reveal in folder / copy path) · Tab into a row's hits (pages,
+moments), then ←/→ step them, Esc back · Ctrl+1…9 open row N · Ctrl+C copy
+answer or path · Esc close. The field edits like a macOS text field: ←/→,
+Shift to select, Ctrl or Alt for words, Super for line ends where Hyprland
+lets it through (ui/README.md). The wheel moves the list by the system's
+scroll lines, a touchpad by its own pixels, never a fling.
 
 Calm while typing (decided 18 Oct, after watching it type): the instant
 phase still updates on every keystroke, but rows keep their place and the

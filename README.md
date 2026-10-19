@@ -84,8 +84,8 @@ matches, it says so instead of guessing.
 | ↑ ↓ or Ctrl+N Ctrl+P | move |
 | Enter | open (PDFs at the page, videos at the moment) |
 | Ctrl+Enter | reveal in folder or copy path |
-| ← → | step through a row's pages or moments |
-| Tab | expand a row's pages or moments |
+| ← → | move the cursor (Shift selects, Ctrl or Alt by words) |
+| Tab, then ← → | step through a row's pages or moments; Esc goes back |
 | Ctrl+1 … Ctrl+9 | open row N |
 | Ctrl+C | copy the answer or path |
 | Esc | close |
