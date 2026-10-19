@@ -38,6 +38,11 @@ Item {
   property var activated: null  // the last activate sent, for the test bench
   property var perf: []         // [phase, ms] per response since opening, for the bench
   property var indexing: null   // the latest response's {done, total, stage}, while the daemon is still indexing
+  property var filter: null     // the kinds the query's own words limit it to ("golden retriever video"), as the daemon read them
+  readonly property string filterLabel: (filter || []).map(function(k) {
+    return ({ app: "Apps", setting: "Settings", file: "Text", image: "Photos", video: "Videos", audio: "Audio",
+              clip: "Clipboard", emoji: "Emoji", history: "History", web: "Web" })[k] || k
+  }).join(" + ")
   readonly property int offset: answer ? 1 : 0
   readonly property var current: sel >= offset ? rows[sel - offset] || null : null
   readonly property string selectedKey: (target(sel) || {}).key || ""
@@ -167,7 +172,7 @@ Item {
       var old = shown.rows.filter(function(r) { return local(r) && keys.indexOf(r.key) < 0 })
       var kept = old.length || (shown.answer && !msg.answer) || (msg.empty && !shown.empty)
       msg = { phase: kept ? "instant" : msg.phase, answer: msg.answer || shown.answer, empty: msg.empty && shown.empty,
-              progress: msg.progress, rows: msg.rows.filter(local).concat(old, msg.rows.filter(function(r) { return !local(r) })) }
+              filter: msg.filter || shown.filter, progress: msg.progress, rows: msg.rows.filter(local).concat(old, msg.rows.filter(function(r) { return !local(r) })) }
     }
     shown = msg
     var all = msg.rows.filter(local)
@@ -184,6 +189,7 @@ Item {
     all.forEach(function(r) { r._order = order(r.hits || []) })
     answer = msg.answer || null
     indexing = msg.progress || null
+    filter = msg.filter || null
     rows = all
     phase = msg.phase
     // A new answer (or a new value) takes the selection, so Enter and Ctrl+C act on it.
@@ -294,7 +300,7 @@ Item {
       return JSON.stringify({
         open: root.opened, query: field.text, connected: root.connected, phase: root.phase,
         selected: root.sel - root.offset, selectedKey: root.selectedKey, hit: root.current && (root.current.hits || []).length ? root.hit : null,
-        expanded: root.expanded, empty: root.empty, answer: root.answer,
+        expanded: root.expanded, empty: root.empty, answer: root.answer, filter: root.filter,
         rows: root.rows.map(function(r) { return { key: r.key, kind: r.kind, title: r.title, hits: (r.hits || []).length } }),
         activated: root.activated, perf: root.perf, setup: root.progress, askBind: root.askBind, progress: root.indexing,
         theme: { background: hex(Color.menu.background), text: hex(Color.menu.text) }
@@ -343,7 +349,7 @@ Item {
           id: field
           width: parent.width
           leftPadding: Style.spacing.rowPaddingX
-          rightPadding: Style.spacing.rowPaddingX
+          rightPadding: Style.spacing.rowPaddingX + (chip.visible ? chip.width + Style.spacing.lg : 0)
           focus: true
           clip: true
           color: Color.menu.text
@@ -363,6 +369,27 @@ Item {
             color: Color.menu.text
             opacity: 0.58
             font: field.font
+          }
+
+          Rectangle {  // the kinds the query is limited to, e.g. "Photos + Text"
+            id: chip
+            visible: root.filterLabel !== ""
+            anchors.right: parent.right
+            anchors.rightMargin: Style.spacing.rowPaddingX
+            anchors.verticalCenter: parent.verticalCenter
+            width: chipText.implicitWidth + Style.spacing.lg * 2
+            height: chipText.implicitHeight + Style.spacing.xs * 2
+            radius: Math.min(Style.cornerRadius, height / 2)
+            color: Style.selectedAccentFill
+            Text {
+              id: chipText
+              anchors.centerIn: parent
+              text: root.filterLabel
+              textFormat: Text.PlainText
+              color: Color.menu.text
+              font.family: Style.font.menuFamily
+              font.pixelSize: Style.font.bodySmall
+            }
           }
         }
 
@@ -457,7 +484,7 @@ Item {
           horizontalAlignment: Text.AlignRight
           rightPadding: Style.spacing.rowPaddingX
           visible: list.count > 0 || !!root.answer
-          text: "↵ open    ctrl ↵ reveal    ← → pages, moments, emoji    tab expand    ctrl 1–9 row    esc close"
+          text: "↵ open    ctrl ↵ reveal    ← → pages, sections, emoji    tab expand    ctrl 1–9 row    esc close"
           color: Color.menu.text
           opacity: 0.52
           font.family: Style.font.menuFamily

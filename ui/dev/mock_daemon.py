@@ -8,7 +8,8 @@ It never skips a stale final phase, so the UI's drop-stale-ids path is used.
 Canned queries (substring match, case-insensitive):
   lease / contract / pdf      PDF hit with pages and marked snippet
   novel / epub                EPUB hit with chapters
-  dog / golden / park         video with moments + thumbs, photo, audio (one moment past an hour)
+  dog / golden / park         videos with 6, 2 and 1 sections (thumbs, some with text), a photo, audio with
+                              3 sections (one past an hour), each with its duration
   awkward / smile / emoji     11 emoji rows, the emoji-picker setting after the ninth
   cm / usd / idr / % / 2+2    instant answer (plus whatever else matches)
   100k idr in usd, 3pm sydney in jakarta, byzantine empire timeline
@@ -18,6 +19,9 @@ Canned queries (substring match, case-insensitive):
   qwxz / nothing              empty: true, only the web row
   slow <query>                the same, with the final phase after 1.5 s instead of 0.12 s
   anything else               apps and settings by prefix; the final phase puts a meaning hit on top
+  … text / photos / video / audio, "golden retriever audio and text"
+                              the query without those words, only rows of those kinds (and the web row),
+                              and "filter": [kinds] on both phases
 
   python3 ui/dev/mock_daemon.py [--sock PATH] [--thumbs DIR] [--log FILE] [--indexing SECONDS]
 
@@ -170,20 +174,28 @@ def respond(q, thumbs):
         return [epub, web(q)], [epub, web(q)], answer, False, delay
     if any(w in s for w in ("dog", "golden", "park", "retriever")):
         t = thumbs or [""]
-        moments = [{"locator": {"t": tt, "t_end": tt + 4.0}, "score": sc, "text": "", "thumb": t[i % len(t)]}
-                   for i, (tt, sc) in enumerate([(47.0, 0.78), (12.0, 0.75), (95.0, 0.71), (131.0, 0.69)])]
-        video = row("file:Videos/dog-park.mp4", "video", "dog-park.mp4", "~/Videos · 0:12, 0:47, 1:35, 2:11", "mpv",
-                    {"type": "open", "path": home + "/Videos/dog-park.mp4", "locator": {"t": 47.0}}, 0.78, "meaning",
-                    hits=moments)
+
+        def media(name, kind, folder, icon, spans, duration=None, snippet=None):
+            """A video or audio row; spans are its sections (t, t_end, score, text), best first."""
+            hits = [{"locator": {"t": a, "t_end": b}, "score": sc, "text": said, **({"thumb": t[i % len(t)]} if kind == "video" else {})}
+                    for i, (a, b, sc, said) in enumerate(spans)]
+            r = row("file:%s/%s" % (folder, name), kind, name, "~/" + folder, icon,
+                    {"type": "open", "path": "%s/%s/%s" % (home, folder, name), "locator": hits[0]["locator"]}, spans[0][2], "meaning", snippet, hits)
+            return dict(r, duration=duration) if duration else r
+
+        six = media("dog-park.mp4", "video", "Videos", "mpv", [
+            (47.0, 51.0, 0.78, "golden retriever"), (12.0, 16.0, 0.75, ""), (95.0, 99.0, 0.71, "dog fetching a ball"),
+            (131.0, 139.0, 0.69, ""), (3.0, 5.0, 0.67, "a golden retriever on the grass by the lake at the park"), (150.0, 160.0, 0.66, "")], 165.0)
+        two = media("weekend-clips-oct-2026.mp4", "video", "Videos", "mpv", [(45.07, 53.07, 0.69, ""), (10.0, 30.0, 0.65, "")], 59.0)
+        one = media("beach-day.mp4", "video", "Videos", "mpv", [(12.0, 20.0, 0.67, "")], 95.0)
+        audio = media("park-walk.mp3", "audio", "Music", "audio-x-generic", [
+            (65.0, 80.0, 0.6, "the golden retriever ran across the whole park"), (1210.0, 1225.0, 0.57, "the dog needs a bath after this"),
+            (3725.0, 3740.0, 0.55, "we took the dog home after the park")], 3900.0,
+            marked("…and then the golden retriever ran across the whole park…", words))
         photo = row("file:Pictures/golden1.jpg", "image", "golden1.jpg", "~/Pictures · 12 Oct", t[0] or "image-x-generic",
                     {"type": "open", "path": home + "/Pictures/golden1.jpg", "locator": {}}, 0.74, "meaning",
                     hits=[{"locator": {}, "score": 0.74, "text": "", "thumb": t[0]}])  # a photo's one hit is itself
-        audio = row("file:Music/park-walk.mp3", "audio", "park-walk.mp3", "~/Music · spoken at 1:05, 1:02:05", "audio-x-generic",
-                    {"type": "open", "path": home + "/Music/park-walk.mp3", "locator": {"t": 65.0}}, 0.6, "meaning",
-                    marked("…and then the golden retriever ran across the whole park…", words),
-                    [{"locator": {"t": 65.0, "t_end": 80.0}, "score": 0.6, "text": "the golden retriever ran across the whole park"},
-                     {"locator": {"t": 3725.0, "t_end": 3740.0}, "score": 0.55, "text": "we took the dog home after the park"}])
-        return [web(q)], [video, photo, audio, web(q)], answer, False, delay
+        return [web(q)], [six, photo, two, audio, one, web(q)], answer, False, delay
     if any(w in s for w in ("awkward", "smile", "emoji")):
         emoji = [("😬", "Grimacing face", "awkward · nervous"), ("😅", "Grinning face with sweat", "phew · relief"),
                  ("🙃", "Upside-down face", "silly · sarcasm"), ("😳", "Flushed face", "awkward · embarrassed"),
@@ -206,6 +218,17 @@ def respond(q, thumbs):
                   marked("Demo on the Pi: open Super Space, type " + q + ", show the video moment.", words),
                   [{"locator": {"line": 12}, "score": 0.55, "text": "Demo on the Pi: open Super Space."}])
     return names + [web(q)], [meaning] + names + [web(q)], answer, False, delay
+
+
+KINDS = {"text": "file", "photo": "image", "photos": "image", "video": "video", "videos": "video", "audio": "audio"}
+
+
+def kinds(q):
+    """(the query without its kind words, the kinds they name), as the daemon reads a typed filter; else (q, None)."""
+    words = q.split()
+    ks = list(dict.fromkeys(KINDS[w.lower()] for w in words if w.lower() in KINDS))
+    rest = [w for w in words if w.lower() not in KINDS and w.lower() != "and"]
+    return (" ".join(rest), ks) if ks and rest else (q, None)
 
 
 def png(path, w, h, rgb):
@@ -258,10 +281,15 @@ class Handler(socketserver.StreamRequestHandler):
             if op == "search":
                 q = req.get("q", "")
                 t0 = time.perf_counter()
-                instant, final, answer, empty, delay = respond(q, self.server.thumbs)
+                words, ks = kinds(q)
+                instant, final, answer, empty, delay = respond(words, self.server.thumbs)
+                if ks:
+                    instant, final = ([r for r in rows if r["kind"] in ks + ["web"]] for rows in (instant, final))
+                    empty = all(r["kind"] == "web" for r in final)
                 ms = (time.perf_counter() - t0) * 1000
                 p = progress(self.server)
-                base = {"id": rid, "empty": empty, **({"answer": answer} if answer else {}), **({"progress": p} if p else {})}
+                base = {"id": rid, "empty": empty, **({"answer": answer} if answer else {}), **({"progress": p} if p else {}),
+                        **({"filter": ks} if ks else {})}
                 send({**base, "empty": empty or all(r["kind"] == "web" for r in instant), "phase": "instant", "rows": instant, "timing": {"instant_ms": ms, "embed_ms": 0, "total_ms": ms}})
                 threading.Timer(delay, send, [{**base, "phase": "final", "rows": final,
                                                "timing": {"instant_ms": ms, "embed_ms": delay * 1000, "total_ms": delay * 1000}}]).start()

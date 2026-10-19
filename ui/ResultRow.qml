@@ -4,8 +4,9 @@ import qs.Ui
 
 // One result (a `Row` from crates/core): icon, title, subtitle, the snippet
 // with its marked words, and the row's hits: page chips, or for video and
-// audio the moments in time order, as thumbnails when there are any (a photo
-// is its own icon). An emoji row is a strip: its hits are emoji rows, drawn
+// audio a timeline of the whole length with each section on it, and under it
+// the picked section's text and, for video, every section's thumbnail (a
+// photo is its own icon). An emoji row is a strip: its hits are emoji rows, drawn
 // large, the picked one named under them. Indexed text is always drawn as
 // plain text, never as markup. Every colour, font, size and radius comes from
 // Omarchy's theme.
@@ -24,6 +25,9 @@ Column {
   readonly property var hits: emoji ? [] : item.hits || []
   readonly property var order: emoji ? [] : item._order || []
   readonly property bool thumbs: item.kind !== "image" && hits.some(function(h) { return !!h.thumb })
+  // Video and audio with a known length and sections get a timeline; songs
+  // matched by their whole lyrics have no sections and keep their snippet.
+  readonly property bool timed: item.duration > 0 && hits.length > 0
   readonly property int iconSize: item.kind === "image" ? Style.space(56) : Style.space(28)
   readonly property color ink: selected ? Color.menu.selectedText : Color.menu.text
   // Secondary text is the theme's text colour dimmed, as in Omarchy's menu.
@@ -34,12 +38,13 @@ Column {
   // EPUB parts carry their chapter as the page.
   readonly property bool epub: /\.epub$/i.test(item.key || "")
 
-  // A hit's place: m:ss (h:mm:ss from an hour on), page or chapter, slide, sheet row, line.
+  // A hit's place: m:ss–m:ss (h:mm:ss from an hour on), page or chapter, slide, sheet row, line.
   function where(l) {
-    if (l.t !== undefined) {
-      var s = Math.floor(l.t), two = function(n) { return ("0" + n).slice(-2) }
+    var clock = function(t) {
+      var s = Math.floor(t), two = function(n) { return ("0" + n).slice(-2) }
       return (s < 3600 ? Math.floor(s / 60) : Math.floor(s / 3600) + ":" + two(Math.floor(s / 60) % 60)) + ":" + two(s % 60)
     }
+    if (l.t !== undefined) return clock(l.t) + (l.t_end >= l.t + 1 ? "–" + clock(l.t_end) : "")
     if (l.page) return (epub ? "ch. " : "p. ") + l.page
     if (l.slide) return "slide " + l.slide
     if (l.sheet) return l.sheet + (l.row ? " · row " + l.row : "")
@@ -163,12 +168,59 @@ Column {
         font.family: Style.font.menuFamily
         font.pixelSize: Style.font.bodySmall
       }
+      // Media: the whole length, each section a segment, the picked one emphasised.
+      Item {
+        visible: root.timed
+        width: parent.width
+        height: Math.max(Style.space(10), count.implicitHeight)
+
+        Rectangle {
+          id: track
+          anchors.verticalCenter: parent.verticalCenter
+          width: parent.width - (count.visible ? count.width + Style.spacing.lg : 0)
+          height: Style.space(4)
+          radius: Math.min(Style.cornerRadius, height / 2)
+          color: Color.menu.text
+          opacity: 0.2
+        }
+        Repeater {
+          model: root.timed ? root.hits : []
+          Rectangle {
+            required property var modelData
+            required property int index
+            readonly property var l: modelData.locator || {}
+            readonly property bool picked: root.selected && index === root.hit
+            visible: l.t !== undefined
+            anchors.verticalCenter: parent.verticalCenter
+            width: Math.max(Style.space(4), track.width * ((l.t_end || l.t) - l.t) / root.item.duration)
+            x: Math.min(track.width - width, track.width * l.t / root.item.duration)
+            height: picked ? Style.space(10) : track.height
+            radius: Math.min(Style.cornerRadius, height / 2)
+            color: Color.accent
+            opacity: picked || !root.selected ? 1 : 0.5
+          }
+        }
+        Text {
+          id: count
+          anchors.right: parent.right
+          anchors.verticalCenter: parent.verticalCenter
+          visible: root.hits.length > 1
+          text: root.hits.length + " sections"
+          textFormat: Text.PlainText
+          color: Color.menu.text
+          opacity: root.dim
+          font.family: Style.font.menuFamily
+          font.pixelSize: Style.font.caption
+        }
+      }
+
       Text {
-        // The marked snippet, or the text of the hit picked with ←/→.
+        // The marked snippet, or the text of the hit picked with ←/→; on audio after the picked section's time.
         readonly property var picked: root.hit > 0 ? root.hits[root.hit] : null
+        readonly property string said: picked ? root.marked({ text: picked.text }) : root.item.snippet ? root.marked(root.item.snippet) : ""
         width: parent.width
         visible: text.length > 0 && !root.expanded
-        text: picked ? root.marked({ text: picked.text }) : root.item.snippet ? root.marked(root.item.snippet) : ""
+        text: said && root.timed && !root.thumbs ? root.where(root.hits[root.hit].locator || {}) + "   " + said : said
         textFormat: Text.StyledText
         wrapMode: Text.Wrap
         maximumLineCount: 2
@@ -179,51 +231,46 @@ Column {
         font.pixelSize: Style.font.body
       }
 
-      // Moments in time order on a timeline; the picked one is outlined.
-      Item {
+      // Sections in time order, each a thumbnail over its time and text; the picked one is outlined.
+      Row {
+        id: strip
         visible: root.thumbs
-        width: strip.width
-        height: strip.height
-
-        Rectangle {
-          y: strip.topPadding + Style.space(54) + Style.spacing.xxs
-          width: parent.width
-          height: Style.spacing.hairline
-          color: Color.menu.text
-          opacity: 0.2
-        }
-
-        Row {
-          id: strip
-          topPadding: Style.spacing.sm
-          spacing: Style.spacing.md
-          Repeater {
-            model: root.thumbs ? root.order : []
-            Column {
-              id: moment
-              required property int modelData
-              readonly property var h: root.hits[modelData]
-              readonly property bool picked: root.selected && modelData === root.hit
-              spacing: Style.spacing.xxs * 2
-              BorderSurface {
-                id: frame
-                width: Style.space(96)
-                height: Style.space(54)
-                radius: Math.min(Style.cornerRadius, Style.space(6))
-                color: Style.normalFillFor(Color.menu.text, Color.accent)
-                borderSpec: moment.picked ? Border.flat(Color.accent, Style.space(2)) : Border.none()
-                Image {
-                  anchors.fill: parent
-                  anchors.margins: frame.borderLeft
-                  source: moment.h.thumb ? Util.fileUrl(moment.h.thumb) : ""
-                  sourceSize: Qt.size(width * Screen.devicePixelRatio, height * Screen.devicePixelRatio)
-                  fillMode: Image.PreserveAspectCrop
-                  asynchronous: true
-                }
+        topPadding: Style.spacing.sm
+        spacing: Style.spacing.md
+        // As wide as fits: up to 96, so 8 sections still fit the row.
+        readonly property real cell: Math.min(Style.space(96), (body.width - spacing * (root.order.length - 1)) / root.order.length)
+        Repeater {
+          model: root.thumbs ? root.order : []
+          Column {
+            id: moment
+            required property int modelData
+            readonly property var h: root.hits[modelData]
+            readonly property bool picked: root.selected && modelData === root.hit
+            spacing: Style.spacing.xxs * 2
+            BorderSurface {
+              id: frame
+              width: strip.cell
+              height: Math.round(width * 9 / 16)
+              radius: Math.min(Style.cornerRadius, Style.space(6))
+              color: Style.normalFillFor(Color.menu.text, Color.accent)
+              borderSpec: moment.picked ? Border.flat(Color.accent, Style.space(2)) : Border.none()
+              Image {
+                anchors.fill: parent
+                anchors.margins: frame.borderLeft
+                source: moment.h.thumb ? Util.fileUrl(moment.h.thumb) : ""
+                sourceSize: Qt.size(width * Screen.devicePixelRatio, height * Screen.devicePixelRatio)
+                fillMode: Image.PreserveAspectCrop
+                asynchronous: true
               }
+            }
+            Repeater {  // its time, then its text (a label or what is said) when it has any
+              model: [root.where(moment.h.locator || {}), String(moment.h.text || "").replace(/\s+/g, " ").trim()].filter(String)
               Text {
-                text: root.where(moment.h.locator || {})
+                required property string modelData
+                width: strip.cell
+                text: modelData
                 textFormat: Text.PlainText
+                elide: Text.ElideRight
                 color: moment.picked ? Color.accent : Color.menu.text
                 opacity: moment.picked ? 1 : root.dim
                 font.family: Style.font.menuFamily
@@ -234,13 +281,13 @@ Column {
         }
       }
 
-      // Pages, slides, lines, or moments without thumbnails, as chips.
+      // Pages, slides or lines as chips.
       Flow {
         width: parent.width
-        visible: root.hits.length > 1 && !root.thumbs && !root.expanded
+        visible: root.hits.length > 1 && !root.thumbs && !root.timed && !root.expanded
         spacing: Style.spacing.lg
         Repeater {
-          model: root.thumbs || root.expanded ? [] : root.order
+          model: root.thumbs || root.timed || root.expanded ? [] : root.order
           Text {
             required property int modelData
             readonly property bool picked: root.selected && modelData === root.hit

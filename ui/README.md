@@ -46,7 +46,7 @@ Basilica.
 
 Type to search · ↑/↓ or Ctrl+N/P move · Enter open (on an answer: copy) ·
 Ctrl+Enter the alternative (show in folder, or copy) · ←/→ step through a row's pages or
-moments, or pick an emoji in a strip (with fewer than two, they move the text cursor) · Tab list a row's
+sections, or pick an emoji in a strip (with fewer than two, they move the text cursor) · Tab list a row's
 hits · Ctrl+1…9 open row N · Ctrl+C copy the answer, path or URL (copies the
 selected text if there is any) · Ctrl+U clear · Esc close.
 
@@ -65,7 +65,7 @@ over SSH set `XDG_RUNTIME_DIR` and `OMARCHY_PATH`.) `state` returns:
 ```
 {"open":true,"query":"lease","connected":true,"phase":"final",
  "selected":0,"selectedKey":"file:Documents/lease-2026.pdf","hit":0,"expanded":false,
- "empty":false,"answer":null,"rows":[{"key":"…","kind":"file","title":"…","hits":3},…],
+ "empty":false,"answer":null,"filter":null,"rows":[{"key":"…","kind":"file","title":"…","hits":3},…],
  "activated":{"op":"activate","id":10,"key":"…","q":"lease","hit":1,"alt":false},
  "perf":[["instant",3],["final",4]],"setup":null,"askBind":false,
  "progress":{"done":1240,"total":2800,"stage":"photos"},
@@ -78,7 +78,8 @@ card, where `selectedKey` is `"answer"`); `hit` indexes the selected row's `hits
 `activated` is the last `activate` sent; `perf` is the UI's own time per
 applied response (ms, model update and layout) since it opened; `setup` is
 setup's last progress line; `progress` is the latest response's indexing
-progress (null when it had none); `theme` the menu colours the UI draws with.
+progress (null when it had none); `filter` is the shown response's `filter`
+(below); `theme` the menu colours the UI draws with.
 
 Consecutive emoji rows are drawn as one strip of up to 8 (the rest are
 dropped). In `state` a strip is one row: `key` and `kind` of its first emoji,
@@ -91,10 +92,23 @@ above the key hints says "Indexing · 1,240 of 2,800 · photos" (`stage`, what
 is embedded now, verbatim); it goes with the first response without it.
 
 Hits are labelled p. N (ch. N in an EPUB, whose parts are chapters), slide N,
-sheet · row N, line N, or a time as m:ss (h:mm:ss from an hour on). Photo
+sheet · row N, line N, or a time range as m:ss–m:ss (h:mm:ss from an hour on). Photo
 rows draw no strip: the photo is the icon. Every indexed string (titles,
 subtitles, snippets, hit labels, sheet names, answers, emoji) is drawn as plain
 text; the snippet, which marks words with markup, escapes the text first.
+
+Video and audio rows with a `duration` (seconds) draw it as a bar: each hit
+is a segment from `t` to `t_end`, the picked one raised, and "N sections" at
+the end when there is more than one. Under the bar, the picked section's text
+(audio after its time range), then for video every section's thumbnail with its
+time range and, when the hit has text (a label or what is said), that text on
+one line. ←/→ step sections, Enter plays from the picked one, Tab lists them
+all. Without a `duration`, video keeps the thumbnails and audio has time chips.
+
+When a response has `"filter": [kinds]` (the kinds the query's own words
+limit it to, e.g. "golden retriever photos and text"), a chip at the right of
+the box names them ("Photos + Text"); editing the words changes it. Like the
+answer card, while typing it can appear but not go; it goes once typing pauses.
 
 Calm while typing: until typing has paused for 400 ms, responses only add.
 New rows go on top of the rows on screen, a new answer replaces the card, and
@@ -120,8 +134,9 @@ clear that cache (`Qt.clearComponentCache` does not exist in QML on Qt 6.11).
 python3 ui/dev/mock_daemon.py [--sock PATH] [--thumbs DIR] [--log FILE] [--indexing SECONDS]
 ```
 
-Python stdlib only; canned two-phase answers for `lease`, `novel` (EPUB chapters), `golden retriever`,
-`awkward` (11 emoji, the picker setting after the ninth), `5'11" in cm`, `qwxz` (empty), `slow <query>` (final after 1.5 s),
+Python stdlib only; canned two-phase answers for `lease`, `novel` (EPUB chapters), `golden retriever` (videos
+with 6, 2 and 1 sections, audio with 3, each with a duration), any query plus `text`, `photos`, `video` or `audio`
+(only those kinds, with `filter`), `awkward` (11 emoji, the picker setting after the ninth), `5'11" in cm`, `qwxz` (empty), `slow <query>` (final after 1.5 s),
 app/setting prefixes, `sheet` (markup in every indexed string, its `<img>` pointing at 127.0.0.1:47806), and
 `100k idr in usd`, `3pm sydney in jakarta` and `byzantine empire timeline` with every prefix answered as the
 live daemon did (answers that come and go, `empty: true` beside an answer, rows that come and go); `--indexing` adds `progress` to every response for that many seconds. Point a dev shell at it with `SUPERSPACE_SOCK=PATH`
