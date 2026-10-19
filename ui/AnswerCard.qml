@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons  // Qt 6.12's QtQuick has a Color of its own: the theme's is Commons.Color
 import qs.Ui
 
 // An instant answer (an `Answer` from crates/core), two-sided like Raycast:
@@ -11,13 +12,13 @@ BorderSurface {
   property bool selected: false
   signal clicked()
 
-  readonly property color ink: selected ? Color.menu.selectedText : Color.menu.text
+  readonly property color ink: selected ? Commons.Color.menu.selectedText : Commons.Color.menu.text
   readonly property int side: (width - Style.space(40)) / 2
 
   height: body.implicitHeight + Style.spacing.huge * 2
   radius: Style.cornerRadius
-  color: selected ? Color.menu.selectedBackground : Style.normalFillFor(Color.menu.text, Color.accent)
-  borderSpec: selected ? Border.surfaceSpec("menu", "selected-border", Color.menu.selectedBorder, 0) : Border.none()
+  color: selected ? Commons.Color.menu.selectedBackground : Style.normalFillFor(Commons.Color.menu.text, Commons.Color.accent)
+  borderSpec: selected ? Border.surfaceSpec("menu", "selected-border", Commons.Color.menu.selectedBorder, 0) : Border.none()
 
   component Line: Text {
     width: root.side
@@ -35,20 +36,20 @@ BorderSurface {
 
     Row {
       Line { text: root.answer.input || ""; color: root.ink; font.pixelSize: Style.font.display; font.weight: Font.Medium }
-      Line { width: Style.space(40); text: "→"; color: Color.menu.text; opacity: 0.52; font.pixelSize: Style.font.display }
+      Line { width: Style.space(40); text: "→"; color: Commons.Color.menu.text; opacity: 0.52; font.pixelSize: Style.font.display }
       Line { text: root.answer.output || ""; color: root.ink; font.pixelSize: Style.font.display; font.weight: Font.Medium }
     }
     Row {
-      Line { text: root.answer.input_label || ""; color: Color.menu.text; opacity: 0.52; font.pixelSize: Style.font.caption }
+      Line { text: root.answer.input_label || ""; color: Commons.Color.menu.text; opacity: 0.52; font.pixelSize: Style.font.caption }
       Item { width: Style.space(40); height: 1 }
-      Line { text: root.answer.output_label || ""; color: Color.menu.text; opacity: 0.52; font.pixelSize: Style.font.caption }
+      Line { text: root.answer.output_label || ""; color: Commons.Color.menu.text; opacity: 0.52; font.pixelSize: Style.font.caption }
     }
     Line {
       width: root.width
       visible: text.length > 0
       topPadding: Style.spacing.sm
       text: root.answer.detail || ""
-      color: Color.menu.text
+      color: Commons.Color.menu.text
       opacity: 0.52
       font.pixelSize: Style.font.caption
     }

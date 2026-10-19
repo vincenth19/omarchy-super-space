@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons  // Qt 6.12's QtQuick has a Color of its own: the theme's is Commons.Color
 import qs.Ui
 
 // One result (a `Row` from crates/core): icon, title, subtitle, the snippet
@@ -29,7 +30,7 @@ Column {
   // matched by their whole lyrics have no sections and keep their snippet.
   readonly property bool timed: item.duration > 0 && hits.length > 0
   readonly property int iconSize: item.kind === "image" ? Style.space(56) : Style.space(28)
-  readonly property color ink: selected ? Color.menu.selectedText : Color.menu.text
+  readonly property color ink: selected ? Commons.Color.menu.selectedText : Commons.Color.menu.text
   // Secondary text is the theme's text colour dimmed, as in Omarchy's menu.
   readonly property real dim: 0.52
 
@@ -58,7 +59,7 @@ Column {
     var esc = function(a, b) { return chars.slice(a, b).join("").replace(/&/g, "&amp;").replace(/</g, "&lt;") }
     ;(s.marks || []).forEach(function(m) {
       if (m[0] < at) return
-      out += esc(at, m[0]) + "<b><font color=\"" + Color.accent + "\">" + esc(m[0], m[1]) + "</font></b>"
+      out += esc(at, m[0]) + "<b><font color=\"" + Commons.Color.accent + "\">" + esc(m[0], m[1]) + "</font></b>"
       at = m[1]
     })
     return out + esc(at)
@@ -76,7 +77,7 @@ Column {
     leftPadding: Style.spacing.rowPaddingX
     topPadding: Style.spacing.sm
     text: "Nothing on this computer matches"
-    color: Color.menu.text
+    color: Commons.Color.menu.text
     opacity: 0.7
     font.family: Style.font.menuFamily
     font.pixelSize: Style.font.title
@@ -86,8 +87,8 @@ Column {
     width: root.width
     height: Math.max(body.implicitHeight, glyph.height) + Style.spacing.lg * 2
     radius: Style.cornerRadius
-    color: root.selected ? Color.menu.selectedBackground : "transparent"
-    borderSpec: root.selected ? Border.surfaceSpec("menu", "selected-border", Color.menu.selectedBorder, 0) : Border.none()
+    color: root.selected ? Commons.Color.menu.selectedBackground : "transparent"
+    borderSpec: root.selected ? Border.surfaceSpec("menu", "selected-border", Commons.Color.menu.selectedBorder, 0) : Border.none()
 
     MouseArea {  // first, so an emoji's own area is above it
       anchors.fill: parent
@@ -134,8 +135,8 @@ Column {
             width: Style.space(44)
             height: width
             radius: Math.min(Style.cornerRadius, Style.space(6))
-            color: picked ? Style.normalFillFor(Color.menu.text, Color.accent) : "transparent"
-            borderSpec: picked ? Border.flat(Color.accent, Style.space(2)) : Border.none()
+            color: picked ? Style.normalFillFor(Commons.Color.menu.text, Commons.Color.accent) : "transparent"
+            borderSpec: picked ? Border.flat(Commons.Color.accent, Style.space(2)) : Border.none()
             Text {
               anchors.centerIn: parent
               text: String(modelData.key).slice(6) // "emoji:<emoji>"
@@ -163,7 +164,7 @@ Column {
         text: root.emoji ? (root.item.hits[root.hit] || root.item.hits[0]).title : root.item.subtitle || ""
         textFormat: Text.PlainText
         elide: Text.ElideMiddle
-        color: Color.menu.text
+        color: Commons.Color.menu.text
         opacity: root.dim
         font.family: Style.font.menuFamily
         font.pixelSize: Style.font.bodySmall
@@ -180,7 +181,7 @@ Column {
           width: parent.width - (count.visible ? count.width + Style.spacing.lg : 0)
           height: Style.space(4)
           radius: Math.min(Style.cornerRadius, height / 2)
-          color: Color.menu.text
+          color: Commons.Color.menu.text
           opacity: 0.2
         }
         Repeater {
@@ -196,7 +197,7 @@ Column {
             x: Math.min(track.width - width, track.width * l.t / root.item.duration)
             height: picked ? Style.space(10) : track.height
             radius: Math.min(Style.cornerRadius, height / 2)
-            color: Color.accent
+            color: Commons.Color.accent
             opacity: picked || !root.selected ? 1 : 0.5
           }
         }
@@ -207,7 +208,7 @@ Column {
           visible: root.hits.length > 1
           text: root.hits.length + " sections"
           textFormat: Text.PlainText
-          color: Color.menu.text
+          color: Commons.Color.menu.text
           opacity: root.dim
           font.family: Style.font.menuFamily
           font.pixelSize: Style.font.caption
@@ -225,7 +226,7 @@ Column {
         wrapMode: Text.Wrap
         maximumLineCount: 2
         elide: Text.ElideRight
-        color: Color.menu.text
+        color: Commons.Color.menu.text
         opacity: 0.8
         font.family: Style.font.menuFamily
         font.pixelSize: Style.font.body
@@ -252,8 +253,8 @@ Column {
               width: strip.cell
               height: Math.round(width * 9 / 16)
               radius: Math.min(Style.cornerRadius, Style.space(6))
-              color: Style.normalFillFor(Color.menu.text, Color.accent)
-              borderSpec: moment.picked ? Border.flat(Color.accent, Style.space(2)) : Border.none()
+              color: Style.normalFillFor(Commons.Color.menu.text, Commons.Color.accent)
+              borderSpec: moment.picked ? Border.flat(Commons.Color.accent, Style.space(2)) : Border.none()
               Image {
                 anchors.fill: parent
                 anchors.margins: frame.borderLeft
@@ -271,7 +272,7 @@ Column {
                 text: modelData
                 textFormat: Text.PlainText
                 elide: Text.ElideRight
-                color: moment.picked ? Color.accent : Color.menu.text
+                color: moment.picked ? Commons.Color.accent : Commons.Color.menu.text
                 opacity: moment.picked ? 1 : root.dim
                 font.family: Style.font.menuFamily
                 font.pixelSize: Style.font.caption
@@ -293,7 +294,7 @@ Column {
             readonly property bool picked: root.selected && modelData === root.hit
             text: root.where(root.hits[modelData].locator || {})
             textFormat: Text.PlainText
-            color: picked ? Color.accent : Color.menu.text
+            color: picked ? Commons.Color.accent : Commons.Color.menu.text
             opacity: picked ? 1 : root.dim
             font.family: Style.font.menuFamily
             font.pixelSize: Style.font.caption
@@ -312,7 +313,7 @@ Column {
           text: root.where(root.hits[modelData].locator || {}) + "   " + String(root.hits[modelData].text || "").replace(/\s+/g, " ")
           textFormat: Text.PlainText
           elide: Text.ElideRight
-          color: picked ? Color.accent : Color.menu.text
+          color: picked ? Commons.Color.accent : Commons.Color.menu.text
           opacity: picked ? 1 : 0.8
           font.family: Style.font.menuFamily
           font.pixelSize: Style.font.body

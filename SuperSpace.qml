@@ -3,6 +3,7 @@ import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
 import qs.Commons
+import qs.Commons as Commons  // Qt 6.12's QtQuick has a Color of its own: the theme's is Commons.Color
 import qs.Ui
 import "ui"
 
@@ -34,7 +35,7 @@ Item {
   property int sel: 0           // 0 is the answer card when there is one
   property string selKey: ""    // the key the selection stays on as responses arrive
   property int hit: 0           // the selected row's picked hit, an index into its hits
-  property bool expanded: false
+  property string mode: "text"  // "sections": Tab went into the selected row's hits, ←/→ step them
   property var activated: null  // the last activate sent, for the test bench
   property var perf: []         // [phase, ms] per response since opening, for the bench
   property var indexing: null   // the latest response's {done, total, stage}, while the daemon is still indexing
@@ -194,12 +195,13 @@ Item {
     phase = msg.phase
     // A new answer (or a new value) takes the selection, so Enter and Ctrl+C act on it.
     var found = keep === "answer" ? (answer ? 0 : -1) : rows.findIndex(function(r) { return r.key === keep })
-    if (found < 0 || (answer && JSON.stringify(answer) !== before)) { sel = 0; hit = 0; expanded = false }
+    if (found < 0 || (answer && JSON.stringify(answer) !== before)) { sel = 0; hit = 0; mode = "text" }
     else sel = keep === "answer" ? 0 : found + offset
     if (current && hit >= (current.hits || []).length) hit = 0
     // Landing on the web row by default is not kept: local rows come first.
     selKey = current ? (found < 0 && current.kind === "web" ? "" : current.key) : answer ? "answer" : ""
     list.forceLayout()
+    glide.stop()
     if (current) list.positionViewAtIndex(sel - offset, ListView.Contain)
     if (msg.phase) perf = perf.concat([[msg.phase, Date.now() - started]])
   }
@@ -212,16 +214,21 @@ Item {
     sel = Math.max(0, Math.min(count - 1, sel + step))
     selKey = current ? current.key : "answer"
     hit = 0
-    expanded = false
+    mode = "text"
+    glide.stop()
     if (current) list.positionViewAtIndex(sel - offset, ListView.Contain)
   }
 
-  // ←/→ walk the selected row's hits; with fewer than two they move the cursor.
+  // In sections, ←/→ walk the selected row's hits in drawn order.
   function stepHit(step) {
-    var o = current ? current._order : []
-    if (o.length < 2) return false
+    var o = current._order
     hit = o[Math.max(0, Math.min(o.length - 1, o.indexOf(hit) + step))]
-    return true
+  }
+
+  // Where Alt+←/→ go, as on macOS: the start of this or the previous word, the end of this or the next.
+  function word(step) {
+    var t = field.text, at = field.cursorPosition
+    return step < 0 ? at - /\S*\s*$/.exec(t.slice(0, at))[0].length : at + /^\s*\S*/.exec(t.slice(at))[0].length
   }
 
   function copy(text) {
@@ -249,27 +256,40 @@ Item {
     close()
   }
 
-  // True when the key was ours; the text field handles the rest.
+  // True when the key was ours. The text field does the rest itself: ←/→, Shift to select,
+  // Ctrl+←/→ by words, Home/End, Ctrl+A, Ctrl+Backspace, Ctrl+X/C/V. Alt and Super (Cmd in
+  // the VM) add the macOS meanings where Hyprland's own Super bindings let them through.
   function press(key, mods) {
-    var ctrl = (mods & Qt.ControlModifier) !== 0
+    var ctrl = (mods & Qt.ControlModifier) !== 0, alt = (mods & Qt.AltModifier) !== 0
+    var meta = (mods & Qt.MetaModifier) !== 0, shift = (mods & Qt.ShiftModifier) !== 0
     var enter = key === Qt.Key_Return || key === Qt.Key_Enter
+    var side = key === Qt.Key_Left ? -1 : key === Qt.Key_Right ? 1 : 0
+    var edge = meta ? side : ctrl ? (key === Qt.Key_Home ? -1 : key === Qt.Key_End ? 1 : 0) : 0  // to the start or the end
+    var back = key === Qt.Key_Backtab || (key === Qt.Key_Tab && shift)
     if (askBind && !field.text && (enter || key === Qt.Key_Escape)) { bind.running = enter; askBind = false }
+    else if (mode === "sections" && (key === Qt.Key_Escape || back)) mode = "text"
     else if (key === Qt.Key_Escape) close()
     else if (key === Qt.Key_Down || (ctrl && key === Qt.Key_N)) move(1)
     else if (key === Qt.Key_Up || (ctrl && key === Qt.Key_P)) move(-1)
     else if (enter) activate(sel, ctrl)
-    else if (key === Qt.Key_Right || key === Qt.Key_Left) return stepHit(key === Qt.Key_Right ? 1 : -1)
-    else if (key === Qt.Key_Tab) expanded = !expanded && !!current && (current.hits || []).length > 0
+    else if (mode === "sections" && side && !mods) stepHit(side)
+    else if (key === Qt.Key_Tab && !back && current && (current.hits || []).length) mode = "sections"
+    else if (key === Qt.Key_Tab || back) {}  // nothing to go into or back from: the keyboard stays in the box
     else if (ctrl && key >= Qt.Key_1 && key <= Qt.Key_9) activate(offset + key - Qt.Key_1)
     else if (ctrl && key === Qt.Key_C && !field.selectedText && copyText()) { copy(copyText()); close() }
-    else if (ctrl && key === Qt.Key_U) field.text = ""
+    else if (edge || (alt && side)) {
+      var to = edge ? (edge < 0 ? 0 : field.length) : word(side)
+      if (shift) field.moveCursorSelection(to); else field.cursorPosition = to
+    }
+    else if (((alt || meta) && key === Qt.Key_Backspace) || (ctrl && key === Qt.Key_U)) field.remove(alt ? word(-1) : 0, field.cursorPosition)
+    else if (meta && key === Qt.Key_A) field.selectAll()
     else return false
     return true
   }
 
   // ------------------------------------------------------------ test bench
   //   omarchy-shell superspace open 'golden retriever'   open if closed, set the query
-  //   omarchy-shell superspace key Down                  Up Left Right Enter Escape Tab Backspace ctrl+Enter ctrl+2 …
+  //   omarchy-shell superspace key Down                  Up Left Right Enter Escape Tab shift+Tab Backspace ctrl+Enter ctrl+2 alt+Backspace …
   //   omarchy-shell superspace state                     JSON, described in ui/README.md
 
   IpcHandler {
@@ -284,8 +304,7 @@ Item {
     function key(name: string): string {
       var parts = String(name).split("+"), k = parts.pop(), mods = 0
       parts.forEach(function(p) {
-        if (/^ctrl$/i.test(p)) mods |= Qt.ControlModifier
-        else if (/^shift$/i.test(p)) mods |= Qt.ShiftModifier
+        mods |= ({ ctrl: Qt.ControlModifier, shift: Qt.ShiftModifier, alt: Qt.AltModifier, super: Qt.MetaModifier })[p.toLowerCase()] || 0
       })
       var code = ({ Down: Qt.Key_Down, Up: Qt.Key_Up, Left: Qt.Key_Left, Right: Qt.Key_Right, Enter: Qt.Key_Return,
                     Return: Qt.Key_Return, Escape: Qt.Key_Escape, Tab: Qt.Key_Tab, Backspace: Qt.Key_Backspace })[k]
@@ -300,10 +319,10 @@ Item {
       return JSON.stringify({
         open: root.opened, query: field.text, connected: root.connected, phase: root.phase,
         selected: root.sel - root.offset, selectedKey: root.selectedKey, hit: root.current && (root.current.hits || []).length ? root.hit : null,
-        expanded: root.expanded, empty: root.empty, answer: root.answer, filter: root.filter,
+        mode: root.mode, expanded: root.mode === "sections", empty: root.empty, answer: root.answer, filter: root.filter,
         rows: root.rows.map(function(r) { return { key: r.key, kind: r.kind, title: r.title, hits: (r.hits || []).length } }),
         activated: root.activated, perf: root.perf, setup: root.progress, askBind: root.askBind, progress: root.indexing,
-        theme: { background: hex(Color.menu.background), text: hex(Color.menu.text) }
+        theme: { background: hex(Commons.Color.menu.background), text: hex(Commons.Color.menu.text) }
       })
     }
   }
@@ -322,7 +341,7 @@ Item {
     WlrLayershell.layer: WlrLayer.Overlay
     WlrLayershell.keyboardFocus: WlrKeyboardFocus.OnDemand
 
-    Rectangle { anchors.fill: parent; color: Color.menu.scrim }
+    Rectangle { anchors.fill: parent; color: Commons.Color.menu.scrim }
     MouseArea { anchors.fill: parent; onClicked: root.close() }
 
     BorderSurface {
@@ -332,8 +351,8 @@ Item {
       x: Math.round((panel.width - width) / 2)
       y: Math.round(panel.height * 0.18)
       radius: Style.cornerRadius
-      color: Color.menu.background
-      borderSpec: Border.surfaceSpec("menu", "border", Color.menu.border, Math.max(1, Style.space(2)))
+      color: Commons.Color.menu.background
+      borderSpec: Border.surfaceSpec("menu", "border", Commons.Color.menu.border, Math.max(1, Style.space(2)))
       padding: Style.spacing.panelPadding
 
       MouseArea { anchors.fill: parent }
@@ -352,12 +371,13 @@ Item {
           rightPadding: Style.spacing.rowPaddingX + (chip.visible ? chip.width + Style.spacing.lg : 0)
           focus: true
           clip: true
-          color: Color.menu.text
+          color: Commons.Color.menu.text
           selectionColor: Style.selectionFill
-          selectedTextColor: Color.menu.text
+          selectedTextColor: Commons.Color.menu.text
           font.family: Style.font.menuFamily
           font.pixelSize: Style.font.display
-          onTextChanged: root.search(text)
+          onTextChanged: { root.mode = "text"; root.search(text) }
+          onCursorPositionChanged: root.mode = "text"  // typing or moving the cursor leaves the sections
           // Like Spotlight: another window taking the keyboard closes the box.
           onActiveFocusChanged: if (!activeFocus && root.opened) root.close()
           Keys.onPressed: function(event) { if (root.press(event.key, event.modifiers)) event.accepted = true }
@@ -366,7 +386,7 @@ Item {
             x: field.leftPadding
             visible: !field.text
             text: "Search apps, files, photos, answers…"
-            color: Color.menu.text
+            color: Commons.Color.menu.text
             opacity: 0.58
             font: field.font
           }
@@ -386,7 +406,7 @@ Item {
               anchors.centerIn: parent
               text: root.filterLabel
               textFormat: Text.PlainText
-              color: Color.menu.text
+              color: Commons.Color.menu.text
               font.family: Style.font.menuFamily
               font.pixelSize: Style.font.bodySmall
             }
@@ -413,7 +433,7 @@ Item {
                 : root.connected ? "Nothing on this computer matches" : "Waiting for Super Space (superspace.service)…"
           textFormat: Text.PlainText
           wrapMode: Text.Wrap
-          color: p.step === "error" ? Color.urgent : Color.menu.text
+          color: p.step === "error" ? Commons.Color.urgent : Commons.Color.menu.text
           opacity: 0.7
           font.family: Style.font.menuFamily
           font.pixelSize: Style.font.title
@@ -425,7 +445,7 @@ Item {
             width: (parent.width - parent.leftPadding * 2) * Math.min(1, parent.p.done / parent.p.total)
             height: Style.space(3)
             radius: height / 2
-            color: Color.accent
+            color: Commons.Color.accent
           }
         }
 
@@ -434,7 +454,7 @@ Item {
           width: parent.width
           leftPadding: Style.spacing.rowPaddingX
           text: "Make Super+Space open Super Space?    ↵ yes    esc no"
-          color: Color.menu.selectedText
+          color: Commons.Color.menu.selectedText
           font.family: Style.font.menuFamily
           font.pixelSize: Style.font.title
         }
@@ -450,6 +470,24 @@ Item {
           interactive: contentHeight > height
           boundsBehavior: Flickable.StopAtBounds
 
+          // Wheel and touchpad move the list as far as they turn, never fling it: a touchpad
+          // (it sends scroll phases) by its own pixels, a wheel by the system's scroll lines per
+          // notch. Whole notches ease over a few frames; a high-resolution wheel (the VM turns
+          // the Mac's trackpad into one) and a touchpad are smooth already, so they move at once.
+          WheelHandler {
+            enabled: list.interactive
+            acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad  // Qt on Wayland calls every wheel a touchpad
+            onWheel: function(e) {
+              var pad = e.phase !== Qt.NoScrollPhase
+              var by = pad ? e.pixelDelta.y : e.angleDelta.y / 120 * Qt.styleHints.wheelScrollLines * Style.space(24)
+              var to = Math.max(list.originY, Math.min(list.originY + list.contentHeight - list.height, (glide.running ? glide.to : list.contentY) - by))
+              glide.stop()
+              if (pad || e.angleDelta.y % 120) list.contentY = to
+              else { glide.to = to; glide.start() }
+            }
+          }
+          NumberAnimation { id: glide; target: list; property: "contentY"; duration: 140; easing.type: Easing.OutCubic }
+
           delegate: ResultRow {
             required property var modelData
             required property int index
@@ -458,7 +496,7 @@ Item {
             iconSource: root.iconSource(modelData.icon)
             selected: index + root.offset === root.sel
             hit: selected ? root.hit : 0
-            expanded: selected && root.expanded
+            expanded: selected && root.mode === "sections"
             notice: root.empty && modelData.kind === "web"
             onClicked: function(pick) {
               if (pick >= 0) { root.sel = index + root.offset; root.hit = pick }  // an emoji in a strip: pick it, then paste it
@@ -473,7 +511,7 @@ Item {
           leftPadding: Style.spacing.rowPaddingX
           text: "Indexing · " + Number(p.done).toLocaleString(Qt.locale(), "f", 0) + " of " + Number(p.total).toLocaleString(Qt.locale(), "f", 0) + (p.stage ? " · " + p.stage : "")
           textFormat: Text.PlainText
-          color: Color.menu.text
+          color: Commons.Color.menu.text
           opacity: 0.52
           font.family: Style.font.menuFamily
           font.pixelSize: Style.font.caption
@@ -484,8 +522,9 @@ Item {
           horizontalAlignment: Text.AlignRight
           rightPadding: Style.spacing.rowPaddingX
           visible: list.count > 0 || !!root.answer
-          text: "↵ open    ctrl ↵ reveal    ← → pages, sections, emoji    tab expand    ctrl 1–9 row    esc close"
-          color: Color.menu.text
+          text: root.mode === "sections" ? "← → step    ↵ open there    shift tab or esc back to typing"
+                : "↵ open    ctrl ↵ reveal    tab pages, sections, emoji    ctrl 1–9 row    esc close"
+          color: Commons.Color.menu.text
           opacity: 0.52
           font.family: Style.font.menuFamily
           font.pixelSize: Style.font.caption

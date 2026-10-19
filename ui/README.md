@@ -35,7 +35,8 @@ omarchy-shell shell toggle io.github.vincenth19.superspace '{}'
 Every colour, font, size, radius and transparency comes from Omarchy's theme
 singletons, the same ones Omarchy's own menu uses: `Color.menu.*` (background,
 text, border, scrim, selected-*), `Color.accent` (marked words, picked page or
-moment), `Style.font.*` and `Style.font.menuFamily`, `Style.spacing.*` and
+moment), named `Commons.Color` in the QML because Qt 6.12's QtQuick has a `Color`
+of its own that hides the theme's (the box was unthemed white there), `Style.font.*` and `Style.font.menuFamily`, `Style.spacing.*` and
 `Style.space()`, `Style.cornerRadius` (Hyprland's rounding), `Border.surfaceSpec`
 for borders. The layer namespace is `omarchy-menu`, so a theme's rules for
 menus (blur, no animation) apply. Secondary text is the text colour at the
@@ -45,17 +46,41 @@ Basilica.
 ## Keys
 
 Type to search · ↑/↓ or Ctrl+N/P move · Enter open (on an answer: copy) ·
-Ctrl+Enter the alternative (show in folder, or copy) · ←/→ step through a row's pages or
-sections, or pick an emoji in a strip (with fewer than two, they move the text cursor) · Tab list a row's
-hits · Ctrl+1…9 open row N · Ctrl+C copy the answer, path or URL (copies the
-selected text if there is any) · Ctrl+U clear · Esc close.
+Ctrl+Enter the alternative (show in folder, or copy) · Ctrl+1…9 open row N ·
+Ctrl+C copy the answer, path or URL (copies the selected text if there is any) ·
+Esc close.
+
+The field edits like any text field: ←/→ move the cursor, Shift selects,
+Ctrl+←/→ and Alt+←/→ jump words (Alt as on macOS: to the end of the next word),
+Home/End and Ctrl+Home/End, Ctrl+A select all, Ctrl+Backspace and Alt+Backspace
+delete the word before the cursor, Ctrl+U deletes to the start, Ctrl+X/C/V cut,
+copy and paste a selection. Super (Cmd in the VM) has the macOS meaning where it
+reaches the box: Super+←/→ the start or end, Super+Backspace delete to the
+start, Super+A select all. Hyprland's own bindings win: on both test machines
+Super+←/→ (focus), Super+Shift+←/→ and Super+Backspace never reach it, and the
+VM's Omarchy turns Super+A/C/V/X into Ctrl+A/C/V/X, which do. (On the Pi, a
+Super chord sent with wtype takes the keyboard from the box, so it closes.)
+
+Tab goes into the selected row's sections: its pages, slides, lines or video
+and audio sections, or the emoji of a strip. The first one in drawn order is
+picked and every hit is listed with its text; ←/→ step them, Enter opens at
+the picked one, Esc, Shift+Tab, typing or moving the cursor go back to the
+field (`mode` in `state` is `"sections"` or `"text"`). Tab on a row without
+hits does nothing. Outside the sections the picked hit is still marked: it is
+where Enter opens.
+
+The wheel moves the list by the system's scroll lines per notch (three lines
+of 24 px at the theme's spacing scale: 78 px on both test machines), eased over
+140 ms; a high-resolution wheel (the VM turns the Mac's trackpad into one) and a
+touchpad move it by exactly their own amount. Nothing flings or overshoots.
 
 ## Test bench
 
 ```
 omarchy-shell superspace open 'golden retriever'   # open if closed, set the query
-omarchy-shell superspace key Down                  # Up Left Right Enter Escape Tab Backspace,
+omarchy-shell superspace key Down                  # Up Left Right Enter Escape Tab shift+Tab Backspace,
                                                    # ctrl+Enter ctrl+1 … ctrl+9 ctrl+n ctrl+p ctrl+c ctrl+u
+                                                   # alt+Backspace super+Backspace super+a (modifiers: ctrl shift alt super)
 omarchy-shell superspace state
 ```
 
@@ -64,7 +89,7 @@ over SSH set `XDG_RUNTIME_DIR` and `OMARCHY_PATH`.) `state` returns:
 
 ```
 {"open":true,"query":"lease","connected":true,"phase":"final",
- "selected":0,"selectedKey":"file:Documents/lease-2026.pdf","hit":0,"expanded":false,
+ "selected":0,"selectedKey":"file:Documents/lease-2026.pdf","hit":0,"mode":"text","expanded":false,
  "empty":false,"answer":null,"filter":null,"rows":[{"key":"…","kind":"file","title":"…","hits":3},…],
  "activated":{"op":"activate","id":10,"key":"…","q":"lease","hit":1,"alt":false},
  "perf":[["instant",3],["final",4]],"setup":null,"askBind":false,
@@ -72,7 +97,10 @@ over SSH set `XDG_RUNTIME_DIR` and `OMARCHY_PATH`.) `state` returns:
  "theme":{"background":"#1e1913","text":"#ebe1cc"}}
 ```
 
-`phase` is `"final"` once the latest final phase is shown as it is, else
+`key` sends only the keys the box handles itself (the field's own editing
+keys, such as Left or Home, do nothing over IPC; Backspace deletes the last
+character). `mode` is `"sections"` after Tab (then `expanded` is true too),
+else `"text"`. `phase` is `"final"` once the latest final phase is shown as it is, else
 `"instant"` (see typing below); `selected` indexes `rows` (-1 on the answer
 card, where `selectedKey` is `"answer"`); `hit` indexes the selected row's `hits` (null without hits);
 `activated` is the last `activate` sent; `perf` is the UI's own time per
@@ -102,8 +130,7 @@ is a segment from `t` to `t_end`, the picked one raised, and "N sections" at
 the end when there is more than one. Under the bar, the picked section's text
 (audio after its time range), then for video every section's thumbnail with its
 time range and, when the hit has text (a label or what is said), that text on
-one line. ←/→ step sections, Enter plays from the picked one, Tab lists them
-all. Without a `duration`, video keeps the thumbnails and audio has time chips.
+one line. Tab, then ←/→ step sections, Enter plays from the picked one. Without a `duration`, video keeps the thumbnails and audio has time chips.
 
 When a response has `"filter": [kinds]` (the kinds the query's own words
 limit it to, e.g. "golden retriever photos and text"), a chip at the right of
@@ -120,9 +147,10 @@ phase follows). The selection stays on the same key, except that a new answer
 (or a new value) takes it, so Enter and Ctrl+C act on the answer. The notice
 never shows with an answer card or a local row.
 
-←/→ step through hits in the order they are drawn (page, slide, line or time),
-starting from the best one, so after Right `hit` is the index of the next
-hit in the document, not necessarily 1.
+In the sections ←/→ step through hits in the order they are drawn (page,
+slide, line or time), from the first one drawn, so `hit` is an index into
+`hits` (the best hit is 0), not a position: after Tab on a video whose best
+section is in the middle, `hit` is that of its earliest section.
 
 Changed QML only takes effect after a shell restart (`omarchy-restart-shell`):
 Qt keeps compiled components by URL, and the shell's plugin reload cannot

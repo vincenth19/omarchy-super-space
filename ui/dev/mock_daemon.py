@@ -17,6 +17,7 @@ Canned queries (substring match, case-insensitive):
                               that come and go, empty: true beside an answer, rows that come and go
   sheet                       markup in every indexed string (an <img> fetching 127.0.0.1:47806)
   qwxz / nothing              empty: true, only the web row
+  many                        30 rows of every shape above (videos with thumbnails, photos, audio, PDF), for scrolling
   slow <query>                the same, with the final phase after 1.5 s instead of 0.12 s
   anything else               apps and settings by prefix; the final phase puts a meaning hit on top
   … text / photos / video / audio, "golden retriever audio and text"
@@ -172,6 +173,12 @@ def respond(q, thumbs):
                    [{"locator": {"page": 3}, "score": 0.7, "text": "The lighthouse keeper rowed out to the harbour at dawn."},
                     {"locator": {"page": 11}, "score": 0.66, "text": "Back at the harbour, the storm had passed."}])
         return [epub, web(q)], [epub, web(q)], answer, False, delay
+    if "many" in s:
+        shapes = [r for r in respond("golden", thumbs)[1] + respond("lease", thumbs)[1] if r["kind"] != "web"]
+        rows = [dict(r, key="%s#%d" % (r["key"], i), title="%d · %s" % (i + 1, r["title"]),
+                     icon=(thumbs or [r["icon"]])[i % len(thumbs or [0])] if r["kind"] == "image" else r["icon"])
+                for i, r in enumerate(shapes[i % len(shapes)] for i in range(30))]
+        return [web(q)], rows + [web(q)], answer, False, delay
     if any(w in s for w in ("dog", "golden", "park", "retriever")):
         t = thumbs or [""]
 
