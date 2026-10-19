@@ -94,6 +94,16 @@ whose id is not their latest. The daemon may skip the final phase of a search
 superseded on the same connection. `activate` runs the action in the daemon
 (one code path for UI, CLI and agents) and records the pick.
 
+Type words (decided 19 Oct): kind words at the end of the query (or at the
+start before of/about/with/…), joined by and/or/,/&/only, filter by kind —
+video(s), photo(s)/image(s)/picture(s), audio/song(s)/music/(voice) memo(s),
+text/doc(s)/document(s)/pdf(s)/note(s), app(s), setting(s), clipboard, emoji,
+history/website(s). The daemon strips them, filters, and reports
+`Response.filter` for the UI's chip; a client's own `kinds` wins. A query that
+is itself the name of something the filter would hide ("photo viewer", "text
+editor") is not filtered, and a filter that would leave nothing while an app or
+setting matches the words ("spotify music") falls back to no filter.
+
 ```
 → {"op":"search","id":7,"q":"golden retriever"}
 ← {"id":7,"phase":"instant","rows":[…],"empty":false,"timing":{…}}
@@ -196,8 +206,17 @@ clipboard images) plus the image itself as `Embed::Image`.
 
 - Photos: one `Embed::Image` part (scaled to ≤448 px) + OCR part if any text.
 - Video: frames at 448 px, one `Embed::Image` part per frame with `t`,
-  `t_end`; 160 px thumbnails as hit thumbs; neighbouring frames above the
-  cutoff merge into one range. Audio track → transcript parts as for audio.
+  `t_end`; 160 px thumbnails as hit thumbs. Audio track → transcript parts
+  as for audio.
+- Sections (decided 19 Oct): once a video or recording matches (its best
+  part clears its cutoff), every part whose margin over its own cutoff is
+  within 0.05 of the best part's, and at most 0.015 under the cutoff, joins
+  in; neighbouring frames (or transcript windows and lyric lines) merge into
+  one section, one hit each, best first. Rows carry `duration`, and the UI
+  draws a timeline with the sections highlighted. Each video section is
+  labelled from its best frame against ~260 plain labels in
+  `data/labels.txt` ("dog swimming", "city street"), shown only when the
+  cosine clears 0.70; on the demo videos every label shown was right.
   Frames: the first, one a gap after the last, and one at each scene change
   (ffmpeg scene > 0.3, at least 1 s after the last), but at most two per gap
   on average. The gap is 8 s for videos over 2 minutes on machines with 4 or
