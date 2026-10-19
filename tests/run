@@ -629,6 +629,10 @@ def ui(rep, conn, cfg):
             ipc("key", back)
             step("key-Right-Left", h not in (0, None) and state().get("hit") == 0,
                  f"{there} should move off the best hit (0) and {back} return to it; got {h} then {state().get('hit')}")
+        # In sections mode the first Escape returns to the field; the second closes.
+        ipc("key", "Escape")
+        step("key-Escape-sections", state().get("mode", "text") == "text" and state().get("open") is True,
+             "Escape in sections mode should return to the field, not close")
         ipc("key", "Escape")
         step("key-Escape", state().get("open") is False, "Escape did not close the search box")
         s, _ = open_and_wait("awkward")

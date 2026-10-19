@@ -273,10 +273,12 @@ def ui(fn, arg):
         elif name in ("up", "ctrl+p"):
             st["selected"] = max(st["selected"] - 1, 0)
         elif name == "tab":
-            st["expanded"] = not st["expanded"]
+            st["expanded"], st["mode"] = True, "sections"
         elif name in ("right", "left"):
             hits = st["rows"][st["selected"]]["hits"] if n else 0
             st["hit"] = max(0, min(st["hit"] + (1 if name == "right" else -1), hits - 1))
+        elif name == "escape" and st.get("mode") == "sections":
+            st["expanded"], st["mode"] = False, "text"
         elif name in ("escape", "return"):
             st["open"] = False
     path.write_text(json.dumps(st))
