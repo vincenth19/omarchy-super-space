@@ -218,9 +218,9 @@ pub const TEXT_PRIO: i64 = 9 << 40;
 /// may be empty): records of fnv(MODEL, input) as u64 LE, the scale as f32 LE and DIM
 /// int8s, sorted by hash.
 #[cfg(not(test))]
-static READY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/vectors.bin"));
+pub static READY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/vectors.bin"));
 #[cfg(test)]
-static READY: &[u8] = &[];
+pub static READY: &[u8] = &[];
 const REC: usize = 12 + DIM;
 
 /// The ready-made vector (int8 bytes, scale) for this exact model input, if `data` has one.

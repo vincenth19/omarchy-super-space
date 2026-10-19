@@ -145,7 +145,7 @@ pub fn run(cfg: &Cfg, parts: usize) -> Result<f32> {
                 }
             }
             let t = Instant::now();
-            search::search(&d, q, 30, None, None);
+            search::search(&d, q, 30, None, None, false);
             inproc.push(t.elapsed().as_secs_f32() * 1000.0);
         }
         let (p50, p95, max) = stats(sock);
@@ -158,7 +158,7 @@ pub fn run(cfg: &Cfg, parts: usize) -> Result<f32> {
     for q in &queries[3..6] {
         for _ in 0..10 {
             let t = Instant::now();
-            search::search(&d, q, 30, Some(&qv), None);
+            search::search(&d, q, 30, Some(&qv), None, false);
             ms.push(t.elapsed().as_secs_f32() * 1000.0);
         }
     }

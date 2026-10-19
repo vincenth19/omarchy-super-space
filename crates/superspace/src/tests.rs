@@ -298,7 +298,7 @@ impl T {
         until("embedding", Duration::from_secs(5), || self.d.store.counts().0 == 0);
     }
     fn search(&self, q: &str) -> (Vec<Row>, bool) {
-        search::search(&self.d, q, 30, self.d.query_vec(q).as_ref(), None)
+        search::search(&self.d, q, 30, self.d.query_vec(q).as_ref(), None, false)
     }
     fn keys(&self, q: &str) -> Vec<String> {
         self.search(q).0.into_iter().map(|r| r.key).collect()
@@ -336,7 +336,7 @@ fn names_keywords_and_meaning_rank_as_designed() {
     assert_eq!((rows[0].key.as_str(), rows[0].why), ("app:terminal", Why::Name));
     assert_eq!(t.keys("console")[0], "app:terminal", "names match too");
     assert_eq!(t.keys("lease.pdf")[0], "file:Documents/lease.pdf", "exact file names hit");
-    let (rows, empty) = search::search(&t.d, "rent due", 30, None, None);
+    let (rows, empty) = search::search(&t.d, "rent due", 30, None, None, false);
     assert!(!empty);
     assert_eq!((rows[0].key.as_str(), rows[0].why), ("file:Documents/lease.pdf", Why::Keyword));
     assert_eq!(t.keys("rent due")[0], "file:Documents/lease.pdf");
@@ -344,7 +344,7 @@ fn names_keywords_and_meaning_rank_as_designed() {
     let marked: Vec<String> = sn.marks.iter().map(|&(a, b)| sn.text.chars().skip(a).take(b - a).collect()).collect();
     assert_eq!(marked, ["rent", "due"]);
     // Meaning only: no shared word, so the instant phase has nothing local.
-    let (rows, empty) = search::search(&t.d, "retriever", 30, None, None);
+    let (rows, empty) = search::search(&t.d, "retriever", 30, None, None, false);
     assert!(empty && rows.len() == 1);
     let (rows, empty) = t.search("retriever");
     assert!(!empty);
@@ -480,7 +480,7 @@ fn watcher_indexes_and_forgets_files_within_2s() {
     std::fs::create_dir_all(f.parent().unwrap()).unwrap();
     std::fs::write(&f, "zebra crossing near the school").unwrap();
     let key = "file:Documents/new/zebra.txt";
-    let has = |t: &T| search::search(&t.d, "zebra crossing", 30, None, None).0.iter().any(|r| r.key == key);
+    let has = |t: &T| search::search(&t.d, "zebra crossing", 30, None, None, false).0.iter().any(|r| r.key == key);
     let added = until("new file", Duration::from_secs(2), || has(&t));
     assert!(t.d.store.stamp(key).unwrap().ends_with("~f1"), "the stamp holds the Doc's version: a new extraction reads it again");
     std::fs::write(&f, "now about giraffes").unwrap();
@@ -878,12 +878,104 @@ fn every_matching_kind_shows_in_the_first_five_and_videos_keep_every_moment() {
 }
 
 #[test]
+fn media_hits_are_sections_that_take_in_moments_just_under_the_cutoff() {
+    let t = start(0, "");
+    // "golden retriever" is 0.535 from a frame with five more words, 0.5 from one with six, 0 from the beach.
+    std::fs::write(t.d.cfg.prefs(), FAKE_CUTOFFS.replace("frame = 0.5", "frame = 0.51")).unwrap();
+    t.d.reload_prefs();
+    let at = |a: f32, b: f32| Locator { t: Some(a), t_end: Some(b), ..Locator::default() };
+    let frame = |i: usize, words: &str, loc: Locator| {
+        let img = t.dir.join(format!("cache/v/f{i:04}.jpg"));
+        std::fs::create_dir_all(img.parent().unwrap()).unwrap();
+        std::fs::write(&img, words).unwrap();
+        Part { text: String::new(), locator: loc, embed: Embed::Image(img) }
+    };
+    let (best, near, beach) = ("golden retriever a1 a2 a3 a4 a5", "golden retriever b1 b2 b3 b4 b5 b6", "waves breaking on beach");
+    let frames = [(beach, at(0.0, 10.0)), (near, at(10.0, 20.0)), (near, at(20.0, 30.0)), (beach, at(30.0, 45.0)), (best, at(45.0, 59.0))];
+    let window = |words: &str, loc: Locator| Part { embed: Embed::Text(doc_text("memo", words)), text: words.into(), locator: loc };
+    t.put(vec![
+        Doc { parts: frames.iter().enumerate().map(|(i, (w, l))| frame(i, w, l.clone())).collect(), ..doc("file:v.mp4", Kind::Video, "v.mp4", "", &[]) },
+        Doc { parts: vec![window("sponsor gives six hundred dollars", at(0.0, 13.0)), window("venue costs five hundred", at(13.0, 27.0)),
+            window("venue costs include projector", at(27.0, 38.0)), window("library free room backup", at(38.0, 50.0))],
+            ..doc("file:memo.m4a", Kind::Audio, "memo.m4a", "", &[]) },
+    ]);
+    let row = |q: &str| t.search(q).0.into_iter().find(|r| r.kind != Kind::Web).unwrap();
+    let sections = |r: &Row| r.hits.iter().map(|h| (h.locator.t.unwrap(), h.locator.t_end.unwrap())).collect::<Vec<_>>();
+    let v = row("golden retriever");
+    assert_eq!((sections(&v), v.duration), (vec![(45.0, 59.0), (10.0, 30.0)], Some(59.0)), "best first; the near frames, just under the cutoff, too");
+    let m = row("venue costs");
+    assert_eq!((sections(&m), m.duration), (vec![(13.0, 38.0)], Some(50.0)), "neighbouring windows as one section");
+    assert!(m.hits[0].text.starts_with("venue costs"));
+}
+
+#[test]
+fn type_words_filter_by_kind_unless_they_name_what_the_filter_hides() {
+    let words = |q: &str| search::type_words(q);
+    let s = |q: &str, k: &[Kind]| Some((q.to_string(), k.to_vec(), false));
+    assert_eq!(words("golden retriever video"), s("golden retriever", &[Kind::Video]));
+    assert_eq!(words("only golden retriever video"), s("golden retriever", &[Kind::Video]));
+    assert_eq!(words("Golden Retriever audio and text"), s("golden retriever", &[Kind::Audio, Kind::File]));
+    assert_eq!(words("dog photos, films & voice memos"), s("dog", &[Kind::Image, Kind::Video, Kind::Audio]));
+    assert_eq!(words("songs about a breakup"), s("about a breakup", &[Kind::Audio]));
+    assert_eq!(words("pdfs only lease"), None, "at the start only before of, about, …");
+    assert_eq!(words("lease pdf only"), Some(("lease".into(), vec![Kind::File], true)), "PDFs, not any file");
+    assert_eq!(words("invoice memo pdf"), Some(("invoice".into(), vec![Kind::Audio, Kind::File], true)), "voice memo is two words");
+    assert_eq!(words("lease pdfs or docs"), s("lease", &[Kind::File]), "docs are any file");
+    assert_eq!(words("awkward emoji"), s("awkward", &[Kind::Emoji]));
+    for q in ["text editor", "photo viewer", "music player", "app idea for watering plants", "website redesign invoice", "screenshot",
+        "photos and videos", "dog clip", "lease page", "rock and roll"] {
+        assert_eq!(words(q), None, "{q}");
+    }
+    let t = start(0, "[[boost]]\nkey = \"app:puppy\"\nby = 1.0\n");
+    corpus(&t);
+    t.put(vec![
+        doc("clip:1", Kind::Clip, "my puppy", "my puppy at the park", &[]),
+        doc("app:puppy", Kind::App, "Puppy", "a pet game", &[]),
+        doc("setting:screenshot", Kind::Setting, "Screenshot", "capture the screen", &["take a screenshot"]),
+        doc("setting:hardware", Kind::Setting, "Hardware", "bluetooth audio and printers", &[]),
+        doc("setting:spotify", Kind::Setting, "Spotify", "launch the player", &[]),
+        doc("setting:window-pop", Kind::Setting, "Pop a window out onto a display", "float it", &[]),
+        doc("setting:monitors", Kind::Setting, "Monitors", "resolution and scale", &["display settings"]),
+        doc("emoji:🎶", Kind::Emoji, "Musical notes", "music", &[]),
+        doc("file:Documents/lease-notes.md", Kind::File, "lease-notes.md", "questions about the lease", &[]),
+    ]);
+    let search = |q: &str, kinds: Value| {
+        let v = serde_json::to_value(t.d.handle(serde_json::from_value(json!({"op": "search", "id": 1, "q": q, "kinds": kinds})).unwrap())).unwrap();
+        (v["filter"].clone(), v["rows"].as_array().unwrap().iter().map(|r| r["key"].as_str().unwrap().to_string()).collect::<Vec<_>>())
+    };
+    let keys = |k: &[&str]| k.iter().map(|k| k.to_string()).collect::<Vec<_>>();
+    assert_eq!(search("puppy text", Value::Null), (json!(["file"]), keys(&["file:Documents/puppy.txt", "web:puppy text"])), "an app named puppy, but a file matches");
+    assert_eq!(search("puppy text", json!(["clip", "file"])).0, Value::Null, "kinds the request gives win");
+    assert_eq!(search("zebra text", Value::Null), (json!(["file"]), keys(&["web:zebra text"])), "nothing else matches zebra either");
+    let (filter, rows) = search("take a screenshot", Value::Null);
+    assert_eq!((filter, rows[0].as_str()), (Value::Null, "setting:screenshot"), "the setting's name, not a search for pictures");
+    assert_eq!(search("bluetooth audio", Value::Null).0, Value::Null, "every word of a setting");
+    let (filter, rows) = search("musical notes", Value::Null);
+    assert_eq!((filter, rows[0].as_str()), (Value::Null, "emoji:🎶"), "an emoji's name");
+    let (filter, rows) = search("spotify music", Value::Null);
+    assert_eq!((filter, rows[0].as_str()), (Value::Null, "setting:spotify"), "no song matches, the Spotify setting does");
+    let (filter, rows) = search("display settings", Value::Null);
+    assert_eq!((filter, rows[0].as_str()), (json!(["setting"]), "setting:monitors"), "a setting's name holds its type word");
+    assert_eq!(search("lease pdf", Value::Null), (json!(["file"]), keys(&["file:Documents/lease.pdf", "web:lease pdf"])), "PDFs only");
+    // Learning counts only the rows the filter showed: the boosted Puppy app ranks above puppy.txt, but only unfiltered.
+    let w0 = *t.d.weights.read().unwrap();
+    let picked = |n: usize| until("the pick is learnt", Duration::from_secs(2), || t.d.picks.read().unwrap().len() == n);
+    let open = t.req(json!({"op": "activate", "id": 1, "key": "file:Documents/puppy.txt", "q": "puppy text"}));
+    assert_eq!(open["argv"][1], "/home/u/Documents/puppy.txt");
+    picked(1);
+    assert_eq!(*t.d.weights.read().unwrap(), w0, "first of the rows shown");
+    t.req(json!({"op": "activate", "id": 2, "key": "file:Documents/puppy.txt", "q": "puppy"}));
+    picked(2);
+    assert_ne!(*t.d.weights.read().unwrap(), w0, "under the app");
+}
+
+#[test]
 fn at_most_two_history_rows_unless_asked_for() {
     let t = start(0, "");
     let mut docs: Vec<Doc> = (0..5).map(|i| doc(&format!("history:{i}"), Kind::History, &format!("Dog news {i}"), "https://dog.com/news dog", &[])).collect();
     docs.push(doc("file:Documents/dog.txt", Kind::File, "dog.txt", "dog.com walking the dog", &[]));
     t.put(docs);
-    let history = |q: &str, kinds: Option<&[Kind]>| search::search(&t.d, q, 30, t.d.query_vec(q).as_ref(), kinds).0.iter().filter(|r| r.kind == Kind::History).count();
+    let history = |q: &str, kinds: Option<&[Kind]>| search::search(&t.d, q, 30, t.d.query_vec(q).as_ref(), kinds, false).0.iter().filter(|r| r.kind == Kind::History).count();
     assert_eq!(history("dog", None), 2);
     assert_eq!(history("dog.com", None), 5, "a web address asks for history");
     assert_eq!(history("dog", Some(&[Kind::File, Kind::History])), 5, "so do kinds");
@@ -898,7 +990,7 @@ fn a_title_word_with_one_typo_is_a_name_match() {
         doc("file:Documents/chrome-notes.txt", Kind::File, "chrome-notes.txt", "tabs", &[]),
     ]);
     // Names only (no query vector), so only the typo rule can match.
-    let names = |q: &str| search::search(&t.d, q, 30, None, None);
+    let names = |q: &str| search::search(&t.d, q, 30, None, None, false);
     for q in ["chromum", "chormium", "chromiun", "Chromiumm"] {
         let (rows, _) = names(q);
         assert_eq!((rows[0].key.as_str(), rows[0].why, rows.len()), ("app:chromium", Why::Name, 2), "{q}");
@@ -941,7 +1033,7 @@ fn bare() -> Arc<Daemon> {
 fn a_query_server_that_is_down_never_says_nothing_matches() {
     let d = bare();
     d.store.put(vec![(doc("file:Documents/puppy.txt", Kind::File, "puppy.txt", "my puppy plays fetch", &[]), "1".into(), 0)]).unwrap();
-    let final_phase = |q: &str| match d.search_response(&server::Search { id: 1, q: q.into(), limit: 30, kinds: None, t0: Instant::now() }, Phase::Final, 0.0) {
+    let final_phase = |q: &str| match d.search_response(&server::Search::new(&d, 1, q.into(), 30, None), Phase::Final, 0.0) {
         Response::Search { rows, empty, .. } => (rows.len(), empty),
         _ => unreachable!(),
     };

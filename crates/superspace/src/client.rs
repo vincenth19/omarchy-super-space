@@ -166,7 +166,7 @@ fn compact(v: &Value) -> Value {
         })
         .collect();
     let mut out = json!({"rows": rows});
-    for k in ["empty", "answer"] {
+    for k in ["empty", "answer", "filter"] {
         if !v[k].is_null() {
             out[k] = v[k].clone();
         }

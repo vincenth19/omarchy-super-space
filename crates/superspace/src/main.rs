@@ -7,6 +7,7 @@ mod bench;
 mod client;
 mod embed;
 mod ingest;
+mod labels;
 mod prefs;
 mod search;
 mod server;

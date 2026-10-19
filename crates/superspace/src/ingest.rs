@@ -521,11 +521,12 @@ fn embed_loop(d: Arc<Daemon>) {
 }
 
 /// `superspace precompute OUT`: every app, setting and emoji text on this
-/// machine, embedded through the index server, as a ready-made vector file
+/// machine and the video labels, embedded through the index server, as a ready-made vector file
 /// (compiled in from crates/superspace/data/vectors.bin; see `store::lookup`).
 pub fn precompute(cfg: &Cfg, out: &Path) -> anyhow::Result<()> {
     let parts = [ext::apps(), ext::settings(), ext::emoji()].into_iter().flatten().flat_map(|d| d.parts);
     let mut texts: Vec<String> = parts.filter_map(|p| if let Embed::Text(t) = p.embed { Some(t) } else { None }).collect();
+    texts.extend(crate::labels::inputs());
     texts.sort();
     texts.dedup();
     write_ready(&cfg.index_url, &texts, out)

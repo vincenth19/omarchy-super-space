@@ -142,9 +142,12 @@ pub struct Row {
     pub why: Why,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snippet: Option<Snippet>,
-    /// Best parts first, at most 8.
+    /// Best parts first, at most 8; for audio and video, each is a section (`t` to `t_end`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hits: Vec<Hit>,
+    /// Seconds, for audio and video: the end of its last part.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration: Option<f32>,
 }
 
 /// An instant answer, drawn as a two-sided card: input → output.
@@ -227,6 +230,10 @@ pub enum Response {
         /// Present only while embeddings are pending (meaning search is not complete yet).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         progress: Option<Progress>,
+        /// The kinds that type words in the query asked for ("golden retriever video"); those words
+        /// are not searched for. Never set when the request gave `kinds`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<Vec<Kind>>,
     },
     Value { id: u64, value: serde_json::Value },
     Error { id: u64, error: String },

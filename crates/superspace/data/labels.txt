@@ -1,0 +1,263 @@
+dog
+puppy
+dog swimming
+dog running
+dog playing with a ball
+dog sleeping
+dog on a walk
+cat
+kitten
+cat playing
+cat sleeping
+bird
+birds flying
+seagulls
+parrot
+chickens
+ducks on a pond
+swan
+horse
+cow
+sheep
+goat
+pig
+rabbit
+hamster
+fish in an aquarium
+turtle
+frog
+lizard
+butterfly
+bee on a flower
+kangaroo
+koala
+monkey
+elephant
+giraffe
+zebra
+lion
+tiger
+bear
+deer
+squirrel
+fox
+penguin
+dolphin
+whale
+seal
+crab
+jellyfish
+pelican
+beach and waves
+sandy beach
+calm sea
+rocky coast
+surfing
+tropical beach with palm trees
+sunset over the sea
+sunrise
+sunset
+blue sky
+clouds
+storm clouds
+rain
+snow
+snowy mountains
+mountains
+hills
+forest
+autumn leaves
+park
+garden
+flowers
+grass field
+farm
+desert
+lake
+river
+waterfall
+island
+cave
+night sky with stars
+moon
+rainbow
+fog
+lightning
+ice
+swimming pool
+city street
+traffic
+cars on a road
+highway
+parked cars
+traffic lights
+pedestrian crossing
+buildings
+city skyline
+skyscrapers
+old town
+houses
+street at night
+bridge
+train
+train station
+tram
+bus
+bicycle
+motorbike
+truck
+airport
+airplane
+boat
+ferry
+harbour with boats
+sailing boat
+construction site
+car park
+petrol station
+shopping centre
+shop
+market stall
+farmers market
+supermarket
+restaurant
+cafe
+church
+temple
+castle
+museum
+playground
+stadium
+kitchen
+cooking on a stove
+pot on a stove
+frying pan
+oven
+baking
+washing dishes
+fridge
+dining table
+living room
+sofa
+bedroom
+bathroom
+office
+desk with a laptop
+computer screen
+code on a screen
+keyboard
+phone screen
+television
+classroom
+whiteboard
+meeting room
+library
+bookshelf
+workshop with tools
+garage
+stairs
+window
+hallway
+washing machine
+houseplant
+pizza
+sushi
+fried rice
+noodles
+burger
+sandwich
+salad
+soup
+bread
+cake
+birthday cake
+dessert
+ice cream
+fruit
+vegetables
+eggs
+coffee
+tea
+juice
+breakfast
+barbecue
+chocolate
+cookies
+pasta
+curry
+tacos
+dumplings
+cheese
+groceries
+people walking
+crowd
+people talking
+children playing
+family dinner
+party
+birthday party
+wedding
+concert
+dancing
+presentation on stage
+typing on a laptop
+baby
+football
+basketball
+tennis
+cricket
+rugby
+golf
+swimming
+running
+cycling
+skateboarding
+skiing
+hiking
+camping
+fishing
+kayaking
+yoga
+gym workout
+playing guitar
+playing piano
+drums
+singing
+painting a picture
+reading a book
+gardening
+picnic
+fireworks
+campfire
+christmas tree
+video game
+board game
+chess
+text on a screen
+title card
+document
+receipt
+handwritten note
+map
+chart
+sign
+logo
+screenshot
+terminal window
+web page
+book page
+calendar
+clock
+keys
+mobile phone
+laptop
+camera
+toy
+ball
+balloons
+inside a car
+umbrella
+shoes
+clothes
+bag
+glasses

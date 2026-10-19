@@ -5,11 +5,11 @@ use crate::Cfg;
 use crate::embed::{self, Input, normalize, quantize};
 use crate::ingest::{self, FastQ};
 use crate::prefs::{self, Prefs};
-use crate::search::{self, GENERIC, NF, PHOTO, QVec, QVecs, norm};
+use crate::search::{self, Filter, GENERIC, NF, PHOTO, QVec, QVecs, norm};
 use crate::store::{Pick, STAGES, Store, kind_name, now};
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
-use ss_core::{Action, Kind, Locator, Phase, Progress, Request, Response, Timing};
+use ss_core::{Action, Kind, Locator, Phase, Progress, Request, Response, Row, Timing};
 use std::collections::{BTreeSet, HashMap};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -57,6 +57,17 @@ pub struct Search {
     pub limit: usize,
     pub kinds: Option<Vec<Kind>>,
     pub t0: Instant,
+    pub filter: Option<Filter>,
+}
+
+impl Search {
+    /// Type words ("… video", "… audio and text") filter by kind unless the request gave kinds,
+    /// decided here once for both phases.
+    pub fn new(d: &Daemon, id: u64, q: String, limit: usize, kinds: Option<Vec<Kind>>) -> Search {
+        let t0 = Instant::now();
+        let filter = if kinds.is_none() { search::filter(d, &q) } else { None };
+        Search { id, q, limit, kinds, t0, filter }
+    }
 }
 
 /// Captions any picture matches; how close a picture is to them is its "generic" score.
@@ -148,21 +159,30 @@ impl Daemon {
     pub fn search_response(&self, s: &Search, phase: Phase, instant_ms: f32) -> Response {
         // A final phase starts after the pause for typing (CALM): the time since the instant phase.
         let wait_ms = if phase == Phase::Final { (s.t0.elapsed().as_secs_f32() * 1000.0 - instant_ms).max(0.0) } else { 0.0 };
+        // A type-word filter keeps the web row.
+        let (q, meant, kinds, pdf) = match &s.filter {
+            Some(f) => (f.q.as_str(), f.meant.as_str(), Some([f.kinds.as_slice(), &[Kind::Web]].concat()), f.pdf),
+            None => (s.q.as_str(), s.q.as_str(), s.kinds.clone(), false),
+        };
         let (qv, embed_ms) = match phase {
             Phase::Instant => (None, 0.0),
             Phase::Final => {
                 let t = Instant::now();
-                (self.query_vec(&s.q), t.elapsed().as_secs_f32() * 1000.0)
+                (self.query_vec(meant), t.elapsed().as_secs_f32() * 1000.0)
             }
         };
-        let (rows, empty) = search::search(self, &s.q, s.limit, qv.as_ref(), s.kinds.as_deref());
+        let (mut rows, empty) = search::search(self, q, s.limit, qv.as_ref(), kinds.as_deref(), pdf);
+        // The web row searches the web for what was typed, type words and all.
+        if let Some(web) = rows.last_mut().filter(|r| s.filter.is_some() && r.kind == Kind::Web) {
+            *web = Row { icon: std::mem::take(&mut web.icon), ..search::web_row(&s.q) };
+        }
         // Meaning could not be asked (the query server is down or slow): never claim nothing matches.
-        let empty = empty && (phase == Phase::Instant || qv.is_some() || !meaningful(&s.q));
+        let empty = empty && (phase == Phase::Instant || qv.is_some() || !meaningful(meant));
         let answer = ss_answers::answer(&s.q, self.rates.read().unwrap().as_ref(), now(), &self.tz);
         let total_ms = s.t0.elapsed().as_secs_f32() * 1000.0;
         let instant_ms = if phase == Phase::Instant { total_ms } else { instant_ms };
         let timing = Timing { instant_ms, embed_ms, total_ms, wait_ms };
-        Response::Search { id: s.id, phase, rows, answer, empty, timing, progress: self.progress() }
+        Response::Search { id: s.id, phase, rows, answer, empty, timing, progress: self.progress(), filter: s.filter.as_ref().map(|f| f.kinds.clone()) }
     }
 
     /// Parts embedded out of all known (media not read yet counts one each), and
@@ -186,7 +206,7 @@ impl Daemon {
     pub fn handle(self: &Arc<Self>, req: Request) -> Response {
         let (id, out) = match req {
             Request::Search { id, q, limit, kinds } => {
-                return self.search_response(&Search { id, q, limit, kinds, t0: Instant::now() }, Phase::Final, 0.0);
+                return self.search_response(&Search::new(self, id, q, limit, kinds), Phase::Final, 0.0);
             }
             Request::Activate { id, key, q, hit, alt } => (id, self.activate(&key, &q, hit, alt)),
             Request::Read { id, key, part } => (id, search::read(self, &key, part)),
@@ -205,6 +225,9 @@ impl Daemon {
     /// The action runs first, with only a query vector already at hand; learning from the
     /// pick (it may embed, and waits for the index writer) follows on its own thread.
     fn activate(self: &Arc<Self>, key: &str, q: &str, hit: Option<usize>, alt: bool) -> Result<Value> {
+        // Ranked and learnt as the search ranked and showed it: with its type-word filter (cheap, so decided again).
+        let f = search::filter(self, q);
+        let meant = f.as_ref().map_or(q, |f| f.meant.as_str()).to_string();
         let learn = key != "answer" && !key.starts_with("web:");
         let (action, kind) = if key == "answer" {
             let a = ss_answers::answer(q, self.rates.read().unwrap().as_ref(), now(), &self.tz).context("no answer for this query")?;
@@ -212,8 +235,8 @@ impl Daemon {
         } else if let Some(wq) = key.strip_prefix("web:") {
             (search::web_row(wq).action, Kind::Web)
         } else {
-            let qv = self.qcache.lock().unwrap().get(&norm(q)).cloned();
-            let row = search::pick(self, q, key, qv.as_ref(), false)?;
+            let qv = self.qcache.lock().unwrap().get(&norm(&meant)).cloned();
+            let row = search::pick(self, q, f.as_ref(), key, qv.as_ref(), false)?;
             let mut action = row.action;
             if let (Action::Open { locator, .. }, Some(h)) = (&mut action, hit.and_then(|i| row.hits.get(i))) {
                 *locator = h.locator.clone();
@@ -226,8 +249,8 @@ impl Daemon {
         if learn {
             let (d, key, q) = (self.clone(), key.to_string(), q.to_string());
             std::thread::spawn(move || {
-                let _ = search::pick(&d, &q, &key, d.query_vec(&q).as_ref(), true);
-                let p = Pick { key, q: norm(&q), ts: now() };
+                let _ = search::pick(&d, &q, f.as_ref(), &key, d.query_vec(&meant).as_ref(), true);
+                let p = Pick { key, q: norm(f.as_ref().map_or(&q, |f| &f.q)), ts: now() };
                 if let Err(e) = d.store.add_pick(&p) {
                     eprintln!("superspace: saving a pick: {e:#}");
                 }
@@ -435,7 +458,7 @@ fn connection(d: Arc<Daemon>, conn: UnixStream) {
         }
         match serde_json::from_str::<Request>(&line) {
             Ok(Request::Search { id, q, limit, kinds }) => {
-                let s = Search { id, q, limit, kinds, t0: Instant::now() };
+                let s = Search::new(&d, id, q, limit, kinds);
                 latest.store(id, Ordering::SeqCst);
                 let r = d.search_response(&s, Phase::Instant, 0.0);
                 let Response::Search { timing, .. } = &r else { unreachable!() };

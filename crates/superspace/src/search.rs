@@ -4,6 +4,7 @@
 //! match; the web row always last.
 
 use crate::embed::{DIM, dot, normalize, quantize};
+use crate::labels::Labels;
 use crate::server::Daemon;
 use crate::store::{Item, Mem, Pick, kind_name, now, part_text};
 use anyhow::{Context, Result};
@@ -14,6 +15,7 @@ use serde_json::{Value, json};
 use ss_core::{Action, Hit, Kind, Locator, Row, Snippet, Why};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::OnceLock;
 
 /// A query vector, int8 with its scale.
 pub type QVec = (Vec<i8>, f32);
@@ -42,6 +44,15 @@ pub const CUTOFFS: &[(&str, f32)] = &[
 const TYPO: f32 = 0.85;
 /// Under an answer card a row matching by meaning alone must clear its cutoff by this much.
 const ANSWERED: f32 = 0.03;
+/// A matching video's or recording's sections: every part within SPREAD of its best part's
+/// margin over the cutoff, and at most SLACK under the cutoff (on the demo corpus, for "golden
+/// retriever" the dog at 10-30 s of weekend-clips is 0.645-0.654 against frames' 0.655, the
+/// best frame 0.693, the beach and the street 0.54-0.56).
+const SPREAD: f32 = 0.05;
+const SLACK: f32 = 0.015;
+/// Video sections say what is on screen ("dog swimming", labels.rs): on the demo corpus every
+/// section's best frame gets the right label (0.70-0.77), the one doubtful frame none.
+const LABELS: bool = true;
 
 pub const NF: usize = 23;
 /// The scorer's features, in weight order; weights.json uses these names.
@@ -176,9 +187,9 @@ fn one_edit(a: &[u8], b: &[u8]) -> bool {
     x.len().max(y.len()) <= 1 || (x.len() == 2 && y.len() == 2 && eq(&x[0], &y[1]) && eq(&x[1], &y[0]))
 }
 
-/// Fuzzy name score per item: 1.0 is as good as the query matched against itself; a title
-/// with a typo of the query scores TYPO.
-fn names(mem: &Mem, q: &str) -> HashMap<i64, (f32, bool)> {
+/// Fuzzy name score per item `only` keeps: 1.0 is as good as the query matched against itself; a
+/// title with a typo of the query scores TYPO.
+fn names(mem: &Mem, q: &str, only: impl Fn(&Item) -> bool) -> HashMap<i64, (f32, bool)> {
     let mut out = HashMap::new();
     let q = q.trim();
     if q.is_empty() {
@@ -193,7 +204,7 @@ fn names(mem: &Mem, q: &str) -> HashMap<i64, (f32, bool)> {
     let (ql, words, mut idx) = (q.to_lowercase(), q.split_whitespace().count(), Vec::new());
     let toks = tokens(q);
     let typos = toks.iter().any(|t| t.len() >= 5);
-    for it in mem.items.values() {
+    for it in mem.items.values().filter(|it| only(it)) {
         let (mut top, mut exact) = (0f32, false);
         // The title counts fully, keywords and aliases a bit less.
         for (s, weight) in std::iter::once((&it.title, 1.0)).chain(it.names.iter().map(|n| (n, 0.85))) {
@@ -283,7 +294,7 @@ pub fn rank(d: &Daemon, mem: &Mem, q: &str, qv: Option<&QVecs>, extra: Option<i6
     let prefer = d.prefer.read().unwrap();
     let qn = norm(q);
     let now = now();
-    let names = names(mem, q);
+    let names = names(mem, q, |_| true);
     let mut kw: HashMap<i64, Vec<(i64, f32)>> = HashMap::new();
     for (pid, s) in d.store.read(|c| Ok(keywords(c, q, qv.is_some()))).unwrap_or_default() {
         if let Some(p) = mem.parts.get(&pid) {
@@ -323,11 +334,12 @@ pub fn rank(d: &Daemon, mem: &Mem, q: &str, qv: Option<&QVecs>, extra: Option<i6
         }
         // Meaning: each part against its own cutoff (pictures score higher for
         // everything); a picture also against "a photo of <q>", keeping the better.
-        let (mut above, mut best, mut plain) = (HashMap::new(), None::<(i64, usize, f32)>, 0f32);
+        let (mut above, mut best, mut plain, mut margins) = (HashMap::new(), None::<(i64, usize, f32, f32)>, 0f32, Vec::new());
         for &pid in &it.parts {
             let Some((pm, r)) = mem.parts.get(&pid).and_then(|p| p.row.filter(|_| !scores.is_empty()).map(|r| (p, r))) else { continue };
             let picture = pm.image.is_some();
-            let relevance = |c: f32| ((c - if picture { fcut } else { s.cutoff }) / MEANING_SPAN).clamp(0.0, 1.0);
+            let cut = if picture { fcut } else { s.cutoff };
+            let relevance = |c: f32| ((c - cut) / MEANING_SPAN).clamp(0.0, 1.0);
             plain = plain.max(relevance(scores[r]));
             let c = match photo.filter(|_| picture) {
                 Some(pv) => scores[r].max(cos(mem, r, pv)),
@@ -335,21 +347,27 @@ pub fn rank(d: &Daemon, mem: &Mem, q: &str, qv: Option<&QVecs>, extra: Option<i6
             };
             let rel = relevance(c);
             s.cosine = s.cosine.max(c);
+            margins.push((pid, c, c - cut));
             if rel > 0.0 {
                 above.insert(pid, c);
                 if best.is_none_or(|b| rel > b.2) {
-                    best = Some((pid, r, rel));
+                    best = Some((pid, r, rel, c));
                 }
             }
         }
-        if let Some((pid, r, rel)) = best {
+        // A matching video or recording: its sections are the moments close to its best one, even just under the cutoff.
+        if best.is_some() && matches!(it.kind, Kind::Video | Kind::Audio) {
+            let floor = (margins.iter().map(|m| m.2).fold(f32::MIN, f32::max) - SPREAD).max(-SLACK);
+            above = margins.iter().filter(|m| m.2 >= floor).map(|m| (m.0, m.1)).collect();
+        }
+        if let Some((pid, r, rel, c)) = best {
             f[MEANING] = plain;
             f[PHOTO] = rel - plain;
             if let Some(g) = generic.filter(|_| mem.parts[&pid].image.is_some()) {
                 s.generic = Some(cos(mem, r, g));
             }
             s.hub = cos(mem, r, &centroid);
-            f[HUB] = ((above[&pid] - s.hub) * 2.0).clamp(0.0, 1.0);
+            f[HUB] = ((c - s.hub) * 2.0).clamp(0.0, 1.0);
             if !prefer.is_empty() {
                 let p = it.parts.iter().filter_map(|pid| mem.parts.get(pid)?.row).flat_map(|r| prefer.iter().map(move |v| (r, v)));
                 let pc = p.map(|(r, v)| cos(mem, r, v)).fold(f32::MIN, f32::max);
@@ -393,9 +411,10 @@ pub fn rank(d: &Daemon, mem: &Mem, q: &str, qv: Option<&QVecs>, extra: Option<i6
     out
 }
 
-/// A row's jump points: parts above the cutoff (neighbouring frames merged
-/// into one moment), keyword-matched parts (pictures only when nothing matched
-/// by meaning: their keywords are just the title) and sheets the query names.
+/// A row's jump points: parts matching by meaning, keyword-matched parts
+/// (pictures only when nothing matched by meaning: their keywords are just the
+/// title) and sheets the query names; neighbouring timed parts of one sort
+/// (frames, or transcript windows and lyric lines) merge into one section.
 /// Named parts first, then parts matching by keyword and meaning, by meaning,
 /// by keyword. Only parts with somewhere to jump to (a locator or a picture).
 fn hits(mem: &Mem, it: &Item, above: &HashMap<i64, f32>, kw: &[(i64, f32)], toks: &[String]) -> Vec<H> {
@@ -405,26 +424,30 @@ fn hits(mem: &Mem, it: &Item, above: &HashMap<i64, f32>, kw: &[(i64, f32)], toks
     let h = |pid: i64, score: f32| H { loc: mem.parts[&pid].locator.clone(), score, part: pid, thumb: mem.parts[&pid].image.as_ref().map(thumb) };
     let kw: HashMap<i64, f32> = kw.iter().copied().collect();
     let named = |pid: i64| mem.parts[&pid].locator.sheet.as_deref().map(tokens).is_some_and(|s| !s.is_empty() && s.iter().all(|t| toks.contains(t)));
-    let (mut out, mut run) = (Vec::new(), Vec::new());
-    let flush = |run: &mut Vec<i64>, out: &mut Vec<H>| {
-        let Some(&best) = run.iter().max_by(|a, b| above[a].total_cmp(&above[b])) else { return };
-        let (first, last) = (&mem.parts[&run[0]].locator, &mem.parts[run.last().unwrap()].locator);
+    let (mut out, mut run) = (Vec::new(), Vec::<(i64, f32)>::new());
+    let flush = |run: &mut Vec<(i64, f32)>, out: &mut Vec<H>| {
+        let Some(&(best, score)) = run.iter().max_by(|a, b| (above.contains_key(&a.0), a.1).partial_cmp(&(above.contains_key(&b.0), b.1)).unwrap()) else { return };
+        let (first, last) = (&mem.parts[&run[0].0].locator, &mem.parts[&run[run.len() - 1].0].locator);
         let loc = Locator { t: first.t, t_end: last.t_end.or(last.t).filter(|_| run.len() > 1).or(first.t_end), ..first.clone() };
-        out.push(H { loc, ..h(best, above[&best]) });
+        out.push(H { loc, ..h(best, score) });
         run.clear();
     };
     for &pid in &it.parts {
         let Some(pm) = mem.parts.get(&pid) else { continue };
-        let b = kw.get(&pid).copied();
-        match (pm.image.is_some(), above.get(&pid)) {
-            (true, Some(_)) => run.push(pid),
-            (true, None) => {
-                flush(&mut run, &mut out);
-                out.extend(b.filter(|_| above.is_empty()).map(|b| h(pid, b)));
-            }
-            (false, Some(&c)) => out.push(h(pid, c)),
-            (false, None) => out.extend(b.or(named(pid).then_some(0.0)).map(|b| h(pid, b))),
+        let picture = pm.image.is_some();
+        let b = kw.get(&pid).copied().filter(|_| !picture || above.is_empty());
+        let Some(score) = above.get(&pid).copied().or(b).or((!picture && named(pid)).then_some(0.0)) else {
+            flush(&mut run, &mut out);
+            continue;
+        };
+        if pm.locator.t.is_none() {
+            out.push(h(pid, score));
+            continue;
         }
+        if run.last().is_some_and(|p| mem.parts[&p.0].image.is_some() != picture) {
+            flush(&mut run, &mut out);
+        }
+        run.push((pid, score));
     }
     flush(&mut run, &mut out);
     out.retain(|x| x.thumb.is_some() || x.loc != Locator::default());
@@ -500,19 +523,27 @@ fn snip(mem: &Mem, s: &Sig, w: &[f32; NF]) -> Vec<i64> {
     by_meaning.into_iter().map(|x| *x.0).chain(kw).collect()
 }
 
+/// What a video frame shows, when a label is sure (labels.rs).
+fn label(mem: &Mem, it: &Item, part: i64) -> Option<&'static str> {
+    static ALL: OnceLock<Labels> = OnceLock::new();
+    let r = mem.parts[&part].row.filter(|_| LABELS && it.kind == Kind::Video && mem.parts[&part].image.is_some())?;
+    ALL.get_or_init(|| Labels::new(crate::store::READY)).best(mem.vec(r), mem.scales[r])
+}
+
 /// Hits and the snippet are made here, for shown rows only.
 fn make_row(c: &Connection, mem: &Mem, it: &Item, s: &Sig, toks: &[String], w: &[f32; NF]) -> Row {
     let hits: Vec<Hit> = hits(mem, it, &s.above, &s.kw, toks)
         .into_iter()
-        .map(|h| Hit { text: clip(&part_text(c, h.part), 140), locator: h.loc, score: h.score, thumb: h.thumb })
+        .map(|h| Hit { text: label(mem, it, h.part).map_or_else(|| clip(&part_text(c, h.part), 140), String::from), locator: h.loc, score: h.score, thumb: h.thumb })
         .collect();
     let snippet = snip(mem, s, w).into_iter().map(|p| snippet(&part_text(c, p), toks)).find(|x| !x.text.is_empty());
     let mut action = it.action.clone();
     if let (Action::Open { locator, .. }, Some(h)) = (&mut action, hits.first()) {
         *locator = h.locator.clone();
     }
+    let duration = it.parts.iter().filter_map(|p| mem.parts.get(p).and_then(|p| p.locator.t_end.or(p.locator.t))).reduce(f32::max);
     Row { key: it.key.clone(), kind: it.kind, title: it.title.clone(), subtitle: it.subtitle.clone(), icon: it.icon.clone(), action,
-        score: (s.score * 1000.0).round() / 1000.0, why: s.why(w), snippet, hits }
+        score: (s.score * 1000.0).round() / 1000.0, why: s.why(w), snippet, hits, duration }
 }
 
 fn rows(d: &Daemon, mem: &Mem, ranked: &[(i64, Sig)], q: &str) -> Vec<Row> {
@@ -529,15 +560,19 @@ pub fn web_row(q: &str) -> Row {
         .collect();
     Row { key: format!("web:{q}"), kind: Kind::Web, title: format!("Search the web for “{q}”"), subtitle: "DuckDuckGo".into(),
         icon: "web-browser".into(), action: Action::Url { url: format!("https://duckduckgo.com/?q={enc}") }, score: 0.0,
-        why: Why::Keyword, snippet: None, hits: Vec::new() }
+        why: Why::Keyword, snippet: None, hits: Vec::new(), duration: None }
+}
+
+/// A row `kinds` keeps (every row without kinds); with `pdf` only PDFs among files.
+fn wanted(it: &Item, kinds: Option<&[Kind]>, pdf: bool) -> bool {
+    kinds.is_none_or(|k| k.contains(&it.kind)) && (!pdf || it.kind != Kind::File || it.title.to_lowercase().ends_with(".pdf"))
 }
 
 /// Ranked rows (web row last) and whether nothing local matched; only rows
-/// of `kinds` when given. An empty query lists recently picked items instead.
-pub fn search(d: &Daemon, q: &str, limit: usize, qv: Option<&QVecs>, kinds: Option<&[Kind]>) -> (Vec<Row>, bool) {
+/// `wanted` keeps. An empty query lists recently picked items instead.
+pub fn search(d: &Daemon, q: &str, limit: usize, qv: Option<&QVecs>, kinds: Option<&[Kind]>, pdf: bool) -> (Vec<Row>, bool) {
     let mem = d.store.mem.read().unwrap();
     let qn = norm(q);
-    let wanted = |id: &i64| kinds.is_none_or(|k| k.contains(&mem.items[id].kind));
     let web = !qn.is_empty() && kinds.is_none_or(|k| k.contains(&Kind::Web));
     // Under an answer card a near miss by meaning alone reads as noise.
     let answered = ss_answers::answer(q, d.rates.read().unwrap().as_ref(), now(), &d.tz).is_some();
@@ -553,7 +588,7 @@ pub fn search(d: &Daemon, q: &str, limit: usize, qv: Option<&QVecs>, kinds: Opti
         order(&mem, &mut v);
         v
     };
-    ranked.retain(|x| wanted(&x.0));
+    ranked.retain(|x| wanted(&mem.items[&x.0], kinds, pdf));
     // At most 3 emoji and 2 history rows, unless they are all there is or the query or kinds ask for them.
     let asks = |k: Kind| kinds.is_some_and(|ks| ks.contains(&k)) || if k == Kind::Emoji { qn.starts_with("emoji") } else { asks_history(&qn) };
     for (k, cap) in [(Kind::Emoji, 3), (Kind::History, 2)] {
@@ -591,18 +626,103 @@ pub fn search(d: &Daemon, q: &str, limit: usize, qv: Option<&QVecs>, kinds: Opti
     (rows, empty)
 }
 
+/// The kind a type word asks for ("videos", "pdf", "songs"). Not "clip" (the clipboard's kind,
+/// not a video) nor "page" (of a PDF more often than a web page).
+fn kind_word(w: &str) -> Option<Kind> {
+    Some(match w.strip_suffix('s').unwrap_or(w) {
+        "video" | "movie" | "film" | "footage" => Kind::Video,
+        "photo" | "image" | "picture" | "pic" | "screenshot" => Kind::Image,
+        "audio" | "song" | "music" | "track" | "memo" | "recording" | "podcast" => Kind::Audio,
+        "text" | "doc" | "document" | "file" | "pdf" | "note" => Kind::File,
+        "app" | "application" => Kind::App,
+        "setting" => Kind::Setting,
+        "clipboard" => Kind::Clip,
+        "emoji" => Kind::Emoji,
+        "history" | "website" => Kind::History,
+        _ => return None,
+    })
+}
+
+/// Type words at the end of the query ("golden retriever video", "breakup songs", "… audio and
+/// text"), or at its start before "of", "about", … ("photos of the beach"; "text editor" and "app
+/// idea" stay whole), and "only" anywhere: the rest of the query, the kinds asked for and whether
+/// the files asked for are PDFs. None when nothing else is left.
+pub fn type_words(q: &str) -> Option<(String, Vec<Kind>, bool)> {
+    let lower = q.to_lowercase().replace([',', '&'], " , ");
+    let w: Vec<&str> = lower.split_whitespace().filter(|t| *t != "only").collect();
+    // "voice memos" is one type word.
+    let typeword = |i: &usize| {
+        kind_word(w[*i]).is_some() || ["and", "or", ","].contains(&w[*i]) || w[*i] == "voice" && w.get(i + 1).is_some_and(|t| t.trim_end_matches('s') == "memo")
+    };
+    let end = w.len() - (0..w.len()).rev().take_while(typeword).count();
+    let start = (0..end).take_while(typeword).count();
+    let start = if w.get(start).is_some_and(|t| ["of", "about", "with", "from", "on", "where", "that"].contains(t)) { start } else { 0 };
+    let typed = || w[..start].iter().chain(&w[end..]);
+    let mut kinds = Vec::new();
+    for k in typed().filter_map(|t| kind_word(t)) {
+        if !kinds.contains(&k) {
+            kinds.push(k);
+        }
+    }
+    let pdf = kinds.contains(&Kind::File) && typed().all(|t| kind_word(t) != Some(Kind::File) || t.starts_with("pdf"));
+    (!kinds.is_empty() && start < end).then(|| (w[start..end].join(" "), kinds, pdf))
+}
+
+/// What type words ask for: names and keywords match `q`, meaning `meant`, and only rows of `kinds`
+/// show (only PDFs among files with `pdf`).
+pub struct Filter {
+    pub q: String,
+    pub meant: String,
+    pub kinds: Vec<Kind>,
+    pub pdf: bool,
+}
+
+/// `q` matches an item `only` keeps as the instant phase would show it: by name or keyword.
+fn matched(d: &Daemon, mem: &Mem, q: &str, only: impl Fn(&Item) -> bool) -> bool {
+    let ncut = cutoff(&d.prefs.read().unwrap(), "name");
+    names(mem, q, &only).values().any(|&(n, exact)| exact || n > ncut)
+        || d.store.read(|c| Ok(keywords(c, q, false))).unwrap_or_default().iter().any(|(p, _)| mem.parts.get(p).is_some_and(|p| only(&mem.items[&p.item])))
+}
+
+/// `type_words` as a filter, unless something the filter would hide is called all of the query
+/// ("musical notes" is an emoji), or what is left names an app or setting it would hide and so does
+/// the whole query ("take a screenshot" is the Screenshot setting, "bluetooth audio" the Hardware
+/// setting's words) or nothing the filter keeps matches ("spotify music", "docker image"). Fuzzy
+/// names are matched against apps and settings, and only then against what the filter keeps: about
+/// 1 ms on a Pi. Apps and settings go by their type word ("display settings", "Web App"), so names
+/// and keywords match all of the query for them. Pictures have no "photo" or "video" in their meaning, so for them the type words are
+/// not embedded either; songs and documents read like what they are ("breakup songs" finds the
+/// breakup songs, "breakup" a song titled "After You've Gone").
+pub fn filter(d: &Daemon, q: &str) -> Option<Filter> {
+    let (rest, kinds, pdf) = type_words(q)?;
+    let mem = d.store.mem.read().unwrap();
+    let wants = |it: &Item| wanted(it, Some(&kinds), pdf);
+    let command = |it: &Item| matches!(it.kind, Kind::App | Kind::Setting) && !wants(it);
+    let called = |it: &Item| std::iter::once(&it.title).chain(&it.names).any(|n| n.eq_ignore_ascii_case(q.trim()));
+    let named = if kinds.iter().all(|k| matches!(k, Kind::App | Kind::Setting)) { q.to_string() } else { rest.clone() };
+    if mem.items.values().any(|it| !wants(it) && called(it))
+        || matched(d, &mem, &rest, command) && (matched(d, &mem, q, command) || !matched(d, &mem, &named, wants))
+    {
+        return None;
+    }
+    let meant = if kinds.iter().all(|k| matches!(k, Kind::Image | Kind::Video)) { rest } else { q.to_string() };
+    Some(Filter { q: named, meant, kinds, pdf })
+}
+
 /// The query says it wants browser history, or looks like a web address.
 fn asks_history(qn: &str) -> bool {
     ["history", "visited", "://", "www."].iter().any(|w| qn.contains(w)) || !qn.contains(' ') && qn.contains(['.', '/'])
 }
 
-/// The row for `key` as `q` ranks it (for activation); with `learn`, after
-/// learning from the pick: the picked row should beat every row shown above it.
-pub fn pick(d: &Daemon, q: &str, key: &str, qv: Option<&QVecs>, learn: bool) -> Result<Row> {
+/// The row for `key` as `q` with its type-word filter `f` ranks it (for activation); with `learn`,
+/// after learning from the pick: the picked row should beat every row shown above it (only rows
+/// the filter keeps were shown).
+pub fn pick(d: &Daemon, q: &str, f: Option<&Filter>, key: &str, qv: Option<&QVecs>, learn: bool) -> Result<Row> {
+    let (q, kinds, pdf) = f.map_or((q, None, false), |f| (f.q.as_str(), Some(f.kinds.as_slice()), f.pdf));
     let mem = d.store.mem.read().unwrap();
     let id = *mem.keys.get(key).with_context(|| format!("{key} is not indexed"))?;
     let mut ranked = rank(d, &mem, q, qv, Some(id));
-    ranked.retain(|x| x.1.kept || x.0 == id);
+    ranked.retain(|x| x.0 == id || x.1.kept && wanted(&mem.items[&x.0], kinds, pdf));
     order(&mem, &mut ranked);
     let pos = ranked.iter().position(|x| x.0 == id).unwrap();
     if learn && !norm(q).is_empty() && ranked[pos].1.kept && pos > 0 {
@@ -637,7 +757,7 @@ fn save_weights(path: &Path, w: &[f32; NF]) {
 /// Every signal behind `key`'s score for `q`, each feature with its weight and contribution.
 pub fn explain(d: &Daemon, q: &str, key: &str) -> Result<Value> {
     let qv = d.query_vec(q);
-    let (shown, empty) = search(d, q, 200, qv.as_ref(), None);
+    let (shown, empty) = search(d, q, 200, qv.as_ref(), None, false);
     let mem = d.store.mem.read().unwrap();
     let id = indexed(d, &mem, key)?;
     let (_, s) = rank(d, &mem, q, qv.as_ref(), Some(id)).into_iter().find(|x| x.0 == id).unwrap();
