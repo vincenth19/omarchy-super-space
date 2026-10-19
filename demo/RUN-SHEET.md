@@ -38,7 +38,8 @@ before step 10, because Claude needs the internet.
 | 1 | Super+Space | Opens at once. | "Spotlight that understands meaning, on a Raspberry Pi, offline." |
 | 2 | `apartment lease bond` | The lease PDF, page 3 highlighted. Enter opens it at page 3. | Text inside PDFs, Word, Excel, PowerPoint. |
 | 3 | `where did we agree to hold the meetup` | The committee notes; the snippet shows "…hold the October meetup at The Precinct". | A question, not keywords. |
-| 4 | `golden retriever` | Dog photos, and the weekend video with its dog moment (0:45). Enter plays from there. | One model reads text, photos and video. |
+| 4 | `golden retriever` | Dog photos, and the weekend video with both dog sections marked on its timeline (about 0:10-0:30 and 0:45-0:59; the beach and street parts in between are not). Enter plays the best section; ←/→ step to the other. | One model reads text, photos and video, and knows which parts of a video have the dog. |
+| 4b | Optional: `golden retriever video` | Only the weekend video (and the web row, last). | Add a type word to narrow: video, photos, audio, text, pdf, songs, or two of them ("audio and text"). |
 | 5 | `the venue costs five hundred dollars` | The 5 Oct voice memo, at 0:13. | Spoken words are searchable. |
 | 6 | `songs about a breakup` | Empty Side of the Bed and Keys on the Counter. | Found by their lyrics. |
 | 7 | `anjing` | Dog emoji, then the dog photos. | Indonesian for dog: any language. |

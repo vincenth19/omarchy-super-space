@@ -187,6 +187,12 @@ def absent_problem(row, absent):
     return f"hits where the subject is not on screen: {bad} (absent in {absent})" if bad else ""
 
 
+def sections_problem(row, want):
+    got = [(loc["t"], loc.get("t_end", loc["t"])) for h in row.get("hits") or [] if (loc := h.get("locator", {})).get("t") is not None]
+    miss = [[lo, hi] for lo, hi in want if not any(t0 <= hi + 1 and t1 >= lo - 1 for t0, t1 in got)]
+    return f"no section in {miss} (sections: {got}; want one in each of {want})" if miss else ""
+
+
 def numbers(s):
     return [float(x.replace(",", "")) for x in re.findall(r"-?\d[\d,]*(?:\.\d+)?", s)]
 
@@ -236,6 +242,10 @@ def check_case(c, res):
                 probs.append(why)
             if not (res["instant"] or {}).get("answer"):
                 probs.append("the answer came only in the final phase, not the instant one")
+    if "filter" in c and bool(f.get("filter")) != c["filter"]:
+        probs.append(f"filter {f.get('filter')!r}, want " + ("a type filter" if c["filter"] else "none: the type word is part of what is searched"))
+    if bad := [f"{r.get('kind')} {r.get('key')}" for r in local if "kinds" in c and r.get("kind") not in c["kinds"] or r.get("kind") in c.get("no_kinds", [])]:
+        probs.append(f"{len(bad)} rows of a kind the filter drops: {', '.join(bad[:3])}")
     if "no_key" in c and (bad := [r["key"] for r in local if re.search(c["no_key"], r.get("key", ""))]):
         probs.append(f"{len(bad)} rows that should not be there: {', '.join(bad[:3])}")
     if "want" in c:
@@ -250,6 +260,7 @@ def check_case(c, res):
             row = local[rank - 1]
             snip = (row.get("snippet") or {}).get("text", "")
             for why in (locator_problem(row, c["at"]) if "at" in c else "", absent_problem(row, c["absent"]) if "absent" in c else "",
+                        sections_problem(row, c["sections"]) if "sections" in c else "",
                         f"right row, but its snippet {snip[:80]!r} does not show {c['snippet']!r}" if "snippet" in c and not re.search(c["snippet"], snip) else ""):
                 if why:
                     probs.append(why)
@@ -879,6 +890,9 @@ FAULTS = {  # fault -> regex one failed check must match; "" must pass everythin
     "parity": r"^parity:cli:",
     "slow-index": r"^live:add$",
     "ui-stuck": r"^ui:key-",
+    "one-section": r"^golden:demo-golden-video$",
+    "no-filter": r"^golden:filter-",
+    "greedy-filter": r"^golden:guard-",
 }
 
 
@@ -914,7 +928,7 @@ def self_test(args):
                         break
                     time.sleep(0.1)
                 cfg = argparse.Namespace(sock=sock, bin=[py, fake], ipc=[py, fake, "ui"], home=home, only=None,
-                                         tags=None if fault == "" else ["demo", "no-results"], themes=[], ui_actions=True,
+                                         tags=None if fault == "" else ["demo", "no-results", "filter"], themes=[], ui_actions=True,
                                          allow_home_writes=False, out=tmp / "reports")
                 t0 = now()
                 rep, path = run(cfg)

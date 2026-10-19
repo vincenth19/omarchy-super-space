@@ -12,7 +12,9 @@ bench passes) and anything else by plain keyword search over text files in
 its home (so live add/delete works). SUPERSPACE_FAKE_FAULTS (comma list)
 breaks it on purpose, so `tests/run --self-test` can prove each check fails
 when it should: slow, no-instant, web-first, pad, wrong-locator (also the
-snippet), near-miss, thin-margin, prefs-noop, parity, slow-index, ui-stuck.
+snippet), near-miss, thin-margin, prefs-noop, parity, slow-index, ui-stuck,
+one-section (only a row's best hit), no-filter (type words searched as plain
+words), greedy-filter (a filter on every query).
 'wait' is not a fault: finals come 300 ms late and say so in timing.wait_ms, as
 the real daemon's typing pause does.
 """
@@ -73,6 +75,9 @@ def oracle_rows(cases):
             if "wrong-locator" in FAULTS:
                 loc = {k: (v + 30 if k == "t" else v + 1 if isinstance(v, int) else v) for k, v in loc.items()}
             hits = [{"locator": loc, "score": 0.8, "text": ""}, {"locator": {}, "score": 0.6, "text": ""}]
+        hits += [{"locator": {"t": lo + 0.5, "t_end": min(hi, lo + 4)}, "score": 0.7, "text": ""} for lo, hi in c.get("sections", [])]
+        if "one-section" in FAULTS:
+            hits = hits[:1]
         kind = want.get("kind") or (key.split(":")[0] if not key.startswith("file:") else KIND_BY_EXT.get(pathlib.Path(key).suffix, "file"))
         rows.append({"key": key, "kind": kind, "title": example(want["title"]) if "title" in want else key.rsplit("/", 1)[-1],
                      "subtitle": "", "icon": "text-x-generic", "action": {"type": "open", "path": key, "locator": {}},
@@ -112,6 +117,9 @@ class Daemon:
 
     def results(self, q):
         cases = [c for c in CASES if norm(c["q"]) == norm(q)]
+        if "no-filter" in FAULTS:
+            cases = [c for c in CASES if norm(q).startswith(norm(c["q"]) + " ")] or cases
+        filt = "fake" if "greedy-filter" in FAULTS or any(c.get("filter") for c in cases) else None
         answer = next((answer_for(q, c["answer"]) for c in cases if "answer" in c), None)
         rows = oracle_rows([c for c in cases if "want" in c]) if cases else self.keyword(q)
         if "pad" in FAULTS and any(c.get("empty") for c in cases):
@@ -136,15 +144,15 @@ class Daemon:
                "score": 0.0, "why": "keyword"}
         empty = not rows
         rows = [web] + rows if "web-first" in FAULTS else rows + [web]
-        return rows, answer, empty
+        return rows, answer, empty, filt
 
     def handle(self, req, send):
         op, rid = req.get("op"), req.get("id", 0)
         if op == "search":
             t0 = time.perf_counter()
-            rows, answer, empty = self.results(req["q"])
+            rows, answer, empty, filt = self.results(req["q"])
             rows = rows[: req.get("limit", 30)]
-            base = {"id": rid, "rows": rows, "empty": empty}
+            base = {"id": rid, "rows": rows, "empty": empty, **({"filter": filt} if filt else {})}
             if answer:
                 base["answer"] = answer
             slow = "slow" in FAULTS
