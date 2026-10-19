@@ -1,12 +1,13 @@
 #!/bin/bash
 # Super Space setup: fetches the daemon, llama.cpp, EmbeddingGemma 2 and
 # whisper.cpp for speech (about 1 GB, once), starts the services, gives your
-# coding agents the skill and MCP server, and offers to bind Super+Space. Run
-# it again any time: finished steps are skipped, and an updated plugin gets its
-# new daemon.
+# coding agents (and any you install later) the skill and MCP server, and
+# offers to bind Super+Space. Run it again any time: finished steps are
+# skipped, and an updated plugin gets its new daemon.
 #
 #   superspace-setup [--yes] [--progress] [--binary PATH]   install or update
 #   superspace-setup bind | unbind     Super+Space opens Super Space, or not
+#   superspace-setup agents            set up newly installed agents
 #   superspace-setup doctor            check that each installed piece works
 #   superspace-setup uninstall         undo everything (keeps preferences)
 #
@@ -25,6 +26,8 @@ SHARE=$HOME/.local/share/superspace
 BIN=$SHARE/bin/superspace
 SS=$HOME/.local/bin/superspace
 UNITS=(superspace.service superspace-embed.service superspace-embed-index.service)
+# Runs superspace-setup agents when an agent is installed.
+WATCH=(superspace-agents.path superspace-agents.service)
 BINDINGS=$HOME/.config/hypr/bindings.lua
 MARK_BEGIN='-- >>> superspace-setup: Super+Space opens Super Space (undo: superspace-setup unbind)'
 MARK_END='-- <<< superspace-setup'
@@ -180,6 +183,16 @@ agents() {
   [[ $1 == remove ]] || say agents "Agent skill linked; MCP server registered with: ${got[*]:-no agent found}"
 }
 
+# One setup at a time (the search box or the agent watcher may have started
+# one): a second waits.
+lock() {
+  mkdir -p "$SHARE"
+  exec 9>"$SHARE/.setup.lock"
+  flock -n 9 || { say wait "Another setup is running; waiting for it to finish"; flock 9; }
+}
+
+add_agents() { lock; agents add; }
+
 bind_key() {
   [[ -f $BINDINGS ]] || { say bind "No $BINDINGS; bind Super+Space to: omarchy-shell shell toggle $PLUGIN_ID"; return 0; }
   bound && return 0
@@ -213,10 +226,7 @@ install_all() {
   ((EUID)) || die "run this as your own user, not root"
   local c u
   for c in curl sha256sum tar jq systemctl flock; do command -v "$c" >/dev/null || die "needs $c"; done
-  # One setup at a time (the search box may have started one): a second waits.
-  mkdir -p "$SHARE"
-  exec 9>"$SHARE/.setup.lock"
-  flock -n 9 || { say wait "Another setup is running; waiting for it to finish"; flock 9; }
+  lock
   # The search box runs this when it cannot connect. A daemon that is up, or
   # still starting, is left running.
   if ((PROGRESS)) && systemctl --user -q is-active superspace.service; then
@@ -247,10 +257,10 @@ install_all() {
   ln -sfn "$PLUGIN/bin/superspace-setup" ~/.local/bin/superspace-setup
 
   say services "Starting services"
-  for u in "${UNITS[@]}"; do systemctl --user -q link --force "$PLUGIN/systemd/$u"; done
+  for u in "${UNITS[@]}" "${WATCH[@]}"; do systemctl --user -q link --force "$PLUGIN/systemd/$u"; done
   systemctl --user daemon-reload
-  systemctl --user -q enable superspace.service
-  systemctl --user restart "${UNITS[@]}"
+  systemctl --user -q enable superspace.service superspace-agents.path
+  systemctl --user restart "${UNITS[@]}" superspace-agents.path
 
   agents add
   bind_key
@@ -258,8 +268,11 @@ install_all() {
 }
 
 uninstall() {
-  systemctl --user disable --now "${UNITS[@]}" 2>/dev/null || true
-  unlink_ours "${UNITS[@]/#/$HOME/.config/systemd/user/}"
+  # Stop first: disable deletes the linked unit files, and disable --now then
+  # fails to stop units that are not loaded, leaving the rest running too.
+  systemctl --user stop "${UNITS[@]}" "${WATCH[@]}" 2>/dev/null || true
+  systemctl --user disable "${UNITS[@]}" "${WATCH[@]}" 2>/dev/null || true
+  unlink_ours "${UNITS[@]/#/$HOME/.config/systemd/user/}" "${WATCH[@]/#/$HOME/.config/systemd/user/}"
   systemctl --user daemon-reload 2>/dev/null || true
   agents remove
   unbind_key
@@ -300,6 +313,7 @@ doctor() {
     else "  ok    index: \(.items) things, meaning search complete" end' 2>/dev/null || true
   check "speech to text runs (whisper.cpp $WHISPER_BUILD)" whisper_runs
   check "agent skill linked" skills_linked
+  check "watching for agents installed later" systemctl --user -q is-active superspace-agents.path
   for a in "${AGENTS[@]}"; do
     if real "$a"; then check "MCP server registered with $a" grep -qF "\"$SS\"" "$(mcp_config "$a")"; fi
   done
@@ -311,6 +325,7 @@ MODE=install_all YES=0 PROGRESS=0 DEV_BINARY=
 while (($#)); do
   case $1 in
   doctor | uninstall) MODE=$1 ;;
+  agents) MODE=add_agents ;;
   bind) MODE=bind_key YES=1 ;;
   unbind) MODE=unbind_key ;;
   --yes | -y) YES=1 ;;

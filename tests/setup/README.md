@@ -12,4 +12,10 @@ docker run --rm -v "$PWD:/repo:ro" -v ~/superspace-setup-test:/work IMAGE bash /
 
 With the same `/work`, `doctor-e2e.sh BINARY` runs a real aarch64 daemon and
 the model servers from the unit files and checks `doctor`, and `x64.sh` checks
-that the x86_64 downloads unpack.
+that the x86_64 downloads unpack. `watch-e2e.sh` checks the agent watcher
+under a real systemd, as the lingering user `builder` of a booted container:
+
+```bash
+docker run -d --name ss --privileged --cgroupns=private --tmpfs /run -u root -v "$PWD:/repo:ro" -v ~/superspace-setup-test:/work IMAGE /usr/lib/systemd/systemd
+sleep 5; docker exec ss loginctl enable-linger builder; sleep 3; docker exec -u builder ss bash /repo/tests/setup/watch-e2e.sh
+```

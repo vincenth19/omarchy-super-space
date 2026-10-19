@@ -105,8 +105,10 @@ echo "whisper on 11 s of speech: $(( ($(date +%s%N) - t0) / 1000000 )) ms: $(jq 
 ok "whisper transcribes the installed way" 'jq -r "[.transcription[].text] | join(\"\")" /tmp/stt.json | grep -qi "what your country"'
 ok "~/.local/bin/superspace -> share bin" '[[ $(readlink $HOME/.local/bin/superspace) == $S/bin/superspace ]]'
 ok "~/.local/bin/superspace-setup -> plugin" '[[ $(readlink $HOME/.local/bin/superspace-setup) == $P/bin/superspace-setup ]]'
-ok "units linked from plugin" 'for u in superspace superspace-embed superspace-embed-index; do grep -qx "systemctl --user -q link --force $P/systemd/$u.service" $LOG || exit 1; done'
-ok "enable + restart" 'grep -qx "systemctl --user -q enable superspace.service" $LOG && grep -qx "systemctl --user restart superspace.service superspace-embed.service superspace-embed-index.service" $LOG'
+ok "units linked from plugin" 'for u in superspace.service superspace-embed.service superspace-embed-index.service superspace-agents.path superspace-agents.service; do grep -qx "systemctl --user -q link --force $P/systemd/$u" $LOG || exit 1; done'
+ok "enable + restart" 'grep -qx "systemctl --user -q enable superspace.service superspace-agents.path" $LOG && grep -qx "systemctl --user restart superspace.service superspace-embed.service superspace-embed-index.service superspace-agents.path" $LOG'
+mkdir -p -m 700 /tmp/xdg
+ok "agent watcher units verify" 'XDG_RUNTIME_DIR=/tmp/xdg systemd-analyze --user verify $P/systemd/superspace-agents.path $P/systemd/superspace-agents.service'
 ok "skill linked in 6 dirs" 'for d in .agents/skills .claude/skills .codex/skills .pi/agent/skills .hermes/skills .hermes/profiles/james/skills; do [[ $(readlink $HOME/$d/superspace) == $P/skills/superspace ]] || exit 1; done'
 ok "unrelated skill untouched" '[[ -d $HOME/.claude/skills/omarchy && ! -L $HOME/.claude/skills/omarchy ]]'
 ok "claude mcp add" 'grep -qx "claude mcp add --scope user superspace -- $HOME/.local/bin/superspace mcp" $LOG'
@@ -135,6 +137,16 @@ ok "bindings unchanged" 'cmp -s /tmp/b1 $HOME/.config/hypr/bindings.lua'
 ok "opencode.json unchanged" 'cmp -s /tmp/o1 $HOME/.config/opencode/opencode.json'
 ok "no hyprctl reload when already bound" '! grep -q hyprctl $LOG'
 ok "claude re-registered via remove+add" 'grep -qx "claude mcp remove --scope user superspace" $LOG && grep -qx "claude mcp add --scope user superspace -- $HOME/.local/bin/superspace mcp" $LOG'
+
+echo "== an agent installed after setup: what the watcher runs"
+printf '#!/bin/bash\necho "gemini $*" >>%s\n' "$LOG" >$HOME/.local/share/mise/shims/gemini && chmod +x $HOME/.local/share/mise/shims/gemini
+: >"$LOG"
+outa=$($(sed -n 's/^ExecStart=//p' $P/systemd/superspace-agents.service | sed "s#%h#$HOME#g") 2>&1); rca=$?
+echo "$outa"
+ok "agents: exit 0, all five registered" '[[ $rca == 0 && $outa == *"registered with: claude codex gemini copilot opencode" ]]'
+ok "agents: new gemini registered" 'grep -qx "gemini mcp add -s user superspace $HOME/.local/bin/superspace mcp" $LOG'
+ok "agents: only agents touched" '! grep -qE "^(systemctl|hyprctl|gum)|curl-downloaded|gemini RAN-STUB" $LOG && cmp -s /tmp/b1 $HOME/.config/hypr/bindings.lua'
+rm $HOME/.local/share/mise/shims/gemini
 
 echo "== a second setup waits for the one running"
 flock "$S/.setup.lock" sleep 3 & sleep 0.5
@@ -186,14 +198,15 @@ GUM_ANSWER=0 script -qec "$SETUP --binary /tmp/superspace-dev" /dev/null >/tmp/r
 ok "accepted via gum: bound" 'grep -qx -- "-- <<< superspace-setup" $HOME/.config/hypr/bindings.lua'
 
 echo "== release binary path (local server standing in for GitHub releases)"
-mkdir -p /tmp/rel/v0.1.0 && cd /tmp/rel
+V=$(jq -r .version "$REPO/manifest.json")
+mkdir -p /tmp/rel/v$V && cd /tmp/rel
 python3 -m http.server 8765 --bind 127.0.0.1 >/dev/null 2>&1 &
 HTTP=$!; cd /; sleep 1
 sed 's#https://github.com/$REPO/releases/download#http://127.0.0.1:8765#' "$SETUP" >"$P/bin/setup-rel" && chmod +x "$P/bin/setup-rel"
 out=$("$P/bin/setup-rel" --yes 2>&1); rc=$?
-ok "release missing -> clear error" '[[ $rc -ne 0 && $out == *"no superspace v0.1.0 release for arm64 yet"* ]]'
-printf '#!/bin/sh\necho release-one\n' >/tmp/rel/v0.1.0/superspace-linux-arm64
-(cd /tmp/rel/v0.1.0 && sha256sum superspace-linux-arm64 >superspace-linux-arm64.sha256)
+ok "release missing -> clear error" '[[ $rc -ne 0 && $out == *"no superspace v$V release for arm64 yet"* ]]'
+printf '#!/bin/sh\necho release-one\n' >/tmp/rel/v$V/superspace-linux-arm64
+(cd /tmp/rel/v$V && sha256sum superspace-linux-arm64 >superspace-linux-arm64.sha256)
 : >"$LOG"
 "$P/bin/setup-rel" --yes >/tmp/rel1.out 2>&1; rcr=$?
 ok "release: installs downloaded binary" '[[ $rcr == 0 && $($S/bin/superspace) == release-one ]]'
@@ -201,11 +214,11 @@ ok "release: binary fetched" 'grep -q "curl-downloaded" $LOG'
 : >"$LOG"
 "$P/bin/setup-rel" --yes >/tmp/rel2.out 2>&1
 ok "release: same checksum -> not fetched again" '! grep -q "curl-downloaded" $LOG'
-printf '#!/bin/sh\necho release-two\n' >/tmp/rel/v0.1.0/superspace-linux-arm64
-(cd /tmp/rel/v0.1.0 && sha256sum superspace-linux-arm64 >superspace-linux-arm64.sha256)
+printf '#!/bin/sh\necho release-two\n' >/tmp/rel/v$V/superspace-linux-arm64
+(cd /tmp/rel/v$V && sha256sum superspace-linux-arm64 >superspace-linux-arm64.sha256)
 "$P/bin/setup-rel" --yes >/tmp/rel3.out 2>&1
 ok "release: new checksum -> replaced" '[[ $($S/bin/superspace) == release-two ]]'
-printf "tampered\n" >/tmp/rel/v0.1.0/superspace-linux-arm64; rm -f "$S/bin/superspace"
+printf "tampered\n" >/tmp/rel/v$V/superspace-linux-arm64; rm -f "$S/bin/superspace"
 "$P/bin/setup-rel" --yes >/tmp/rel4.out 2>&1; rct=$?
 ok "release: tampered binary refused" '[[ $rct != 0 ]] && grep -q "failed its checksum" /tmp/rel4.out'
 kill $HTTP; rm -f "$P/bin/setup-rel"
@@ -263,18 +276,18 @@ SSB=$HOME/.local/bin/superspace
 echo "{\"mcpServers\":{\"superspace\":{\"command\":\"$SSB\",\"args\":[\"mcp\"]}}}" >$HOME/.claude.json
 mkdir -p $HOME/.codex $HOME/.copilot && printf '[mcp_servers.superspace]\ncommand = "%s"\nargs = ["mcp"]\n' "$SSB" >$HOME/.codex/config.toml
 cp $HOME/.claude.json $HOME/.copilot/mcp-config.json
-"$SETUP" doctor >/tmp/doc1.out 2>&1; rcd1=$?
+ACTIVE=0 "$SETUP" doctor >/tmp/doc1.out 2>&1; rcd1=$?
 cat /tmp/doc1.out
 ok "doctor all ok: exit 0" '[[ $rcd1 == 0 ]] && ! grep -q FAIL /tmp/doc1.out'
-ok "doctor rows" '[[ $(grep -c "^  ok" /tmp/doc1.out) == 10 ]] && grep -q "MCP server registered with opencode" /tmp/doc1.out && ! grep -q gemini /tmp/doc1.out'
+ok "doctor rows" '[[ $(grep -c "^  ok" /tmp/doc1.out) == 11 ]] && grep -q "MCP server registered with opencode" /tmp/doc1.out && ! grep -q gemini /tmp/doc1.out'
 ok "doctor shows indexing progress" 'grep -qxF "  busy  indexing: 2482 things findable by name, meaning search 43% done (1554 parts and 12 media files left)" /tmp/doc1.out'
 echo '{"items":2482,"vectors":2754,"pending":0,"media_queue":0,"indexing":false}' >/tmp/status.json
-ok "doctor shows a finished index" 'grep -qxF "  ok    index: 2482 things, meaning search complete" <("$SETUP" doctor)'
+ok "doctor shows a finished index" 'grep -qxF "  ok    index: 2482 things, meaning search complete" <(ACTIVE=0 "$SETUP" doctor)'
 kill $I; rm /tmp/answering $HOME/.claude.json; mv $S/whisper/whisper-cli /tmp/wcli; rm $HOME/.claude/skills/superspace
 "$SETUP" doctor >/tmp/doc2.out 2>&1; rcd2=$?
 cat /tmp/doc2.out
 ok "doctor failures: exit 1" '[[ $rcd2 == 1 ]] && grep -q "To repair: superspace-setup" /tmp/doc2.out'
-ok "doctor names each failure" 'for l in "index model server" "daemon answers" "speech to text" "agent skill" "MCP server registered with claude"; do grep -q "FAIL  $l" /tmp/doc2.out || exit 1; done'
+ok "doctor names each failure" 'for l in "index model server" "daemon answers" "speech to text" "agent skill" "watching for agents" "MCP server registered with claude"; do grep -q "FAIL  $l" /tmp/doc2.out || exit 1; done'
 ok "doctor: no daemon, no progress line" '! grep -q "meaning search" /tmp/doc2.out'
 ok "doctor keeps the rest ok" 'for l in "superspace runs" "query model server" "MCP server registered with codex"; do grep -q "ok    $l" /tmp/doc2.out || exit 1; done'
 kill $Q; mv /tmp/wcli $S/whisper/whisper-cli
@@ -290,7 +303,7 @@ ok "skills unlinked, unrelated kept" '[[ -z $(find $HOME/.agents $HOME/.claude $
 ok "share/state/cache removed" '[[ ! -e $S && ! -e $HOME/.local/state/superspace && ! -e $HOME/.cache/superspace ]]'
 ok "bin links removed" '[[ ! -e $HOME/.local/bin/superspace && ! -L $HOME/.local/bin/superspace && ! -L $HOME/.local/bin/superspace-setup ]]'
 ok "preferences kept" '[[ -f $HOME/.config/superspace/preferences.toml ]]'
-ok "units disabled+stopped" 'grep -qx "systemctl --user disable --now superspace.service superspace-embed.service superspace-embed-index.service" $LOG'
+ok "units stopped, then disabled" 'grep -A1 -x "systemctl --user stop superspace.service superspace-embed.service superspace-embed-index.service superspace-agents.path superspace-agents.service" $LOG | grep -qx "systemctl --user disable superspace.service superspace-embed.service superspace-embed-index.service superspace-agents.path superspace-agents.service"'
 ok "agents unregistered" 'grep -qx "claude mcp remove --scope user superspace" $LOG && grep -qx "copilot mcp remove superspace" $LOG && grep -qx "codex-real mcp remove superspace" $LOG && ! grep -q "claude mcp add" $LOG'
 ok "plugin folder untouched" '[[ -x $P/bin/superspace-setup ]]'
 "$SETUP" uninstall >/dev/null 2>&1; ok "second uninstall exit 0" '[[ $? == 0 ]]'

@@ -1,0 +1,12 @@
+[Unit]
+Description=Super Space: watch for coding agents installed after setup
+
+[Path]
+# A mise install (how Omarchy installs agents) ends by adding the agent's shim;
+# other installers link it into ~/.local/bin. Neither watch is recursive, so a
+# big install is a few events here, not one per file.
+PathChanged=%h/.local/share/mise/shims
+PathChanged=%h/.local/bin
+
+[Install]
+WantedBy=default.target

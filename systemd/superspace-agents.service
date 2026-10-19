@@ -1,0 +1,10 @@
+[Unit]
+Description=Super Space: give newly installed coding agents the skill and MCP server
+
+[Service]
+Type=oneshot
+# Let the install finish first (mise may write its config just after the shim).
+# systemd ignores changes while this runs, so a burst of them is one run, and
+# runs at least 10 s apart never reach the start limit.
+ExecStartPre=sleep 10
+ExecStart=%h/.local/bin/superspace-setup agents

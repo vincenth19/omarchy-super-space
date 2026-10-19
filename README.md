@@ -50,7 +50,8 @@ After that, a file you save is searchable within seconds.
 
 ## What runs in the background
 
-Three user services, nothing system-wide:
+Three user services, nothing system-wide (plus a watcher for coding agents
+you install later, see [For AI agents](#for-ai-agents)):
 
 | Service | What it does | Priority |
 |---|---|---|
@@ -126,6 +127,15 @@ files by meaning instead of with `ls`, `find` and `grep`:
   `~/.claude/skills`, `~/.codex/skills`, `~/.pi/agent/skills` or
   `~/.hermes/skills`, Crush, Pi and Hermes included.
 
+An agent you install after setup gets both by itself: a watcher
+(`superspace-agents.path`) notices a new program in `~/.local/bin` or in
+mise's shims (Omarchy installs agents with mise) and runs
+`superspace-setup agents`, which links the skill and registers the MCP server
+with every agent that is really installed, not Omarchy's install-on-first-run
+placeholders. Run that by hand any time; `superspace-setup doctor` shows each
+agent it registered. A session already open sees the MCP server once
+restarted.
+
 If you are an agent: read [skills/superspace/SKILL.md](skills/superspace/SKILL.md).
 Use the commands below with `--json` for the user's own files; `"empty": true`
 means nothing really matches. To install, run the `omarchy plugin add` line
@@ -170,10 +180,11 @@ superspace-setup uninstall
 omarchy plugin remove io.github.vincenth19.superspace
 ```
 
-This stops and removes the three services, the downloads, the index, the agent
-setup and the Super+Space binding (your previous one comes back). Run both: a
-plugin left in place sets itself up again when it next loads. Your preferences
-stay in `~/.config/superspace`; delete that folder too to leave nothing behind.
+This stops and removes the services, the agent watcher, the downloads, the
+index, the agent setup and the Super+Space binding (your previous one comes
+back). Run both: a plugin left in place sets itself up again when it next
+loads. Your preferences stay in `~/.config/superspace`; delete that folder too
+to leave nothing behind.
 
 ## Licence
 
