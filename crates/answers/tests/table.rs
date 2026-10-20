@@ -220,6 +220,8 @@ const CASES: &[(&str, &str, &str)] = &[
     ("london time", "time", "05:00"),
     ("what time is it in new york", "time", "00:00"),
     ("time in bali", "time", "12:00"),
+    ("time shanghai", "time", "12:00"),
+    ("time now shanghai", "time", "12:00"),
     ("time in india", "time", "09:30"),
     ("time in kathmandu", "time", "09:45"),
     ("time in california", "time", "21:00"),

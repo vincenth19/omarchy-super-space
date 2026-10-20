@@ -33,7 +33,7 @@ const ABBR: &[(&str, i32)] = &[
 
 const NOW: &[&str] = &[
     "what time is it in ", "the time in ", "current time in ", "local time in ", "time now in ", "time in ",
-    "time at ", "now in ", "clock in ",
+    "time at ", "now in ", "clock in ", "time now ", "time ",
 ];
 
 fn places() -> &'static HashMap<String, (Tz, String)> {
