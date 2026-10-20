@@ -233,6 +233,13 @@ clipboard images) plus the image itself as `Embed::Image`.
 - Music: lyrics from tags (USLT/SYLT) or a sibling `.lrc` first; otherwise
   transcribe. One part for the whole lyrics (theme: "songs about a breakup")
   plus timed lines.
+- Songs vs recordings (decided 20 Oct): audio is a song when it has an artist
+  or album tag or lyrics, or sits under ~/Music, unless its folders (or genre)
+  name speech: Voice Memos, Recordings, Podcasts, Meetings, Spoken Word. A
+  title tag alone does not count: phone recorders set one. Songs show their
+  title tag (else the file name without extension and track number) over "Song
+  · Artist · 3:42"; recordings keep their file name over "Recording · 5 Oct ·
+  0:43" (the day from a leading YYYY-MM-DD in the name, else creation_time).
 - Media indexing runs on a separate background queue, at idle priority, after
   all text is indexed.
 
@@ -251,10 +258,15 @@ clipboard images) plus the image itself as `Embed::Image`.
   when it was a browser) and shows "from Chromium · Meetup notes". Copies
   Omarchy's capture.sh treats as sensitive (CLIPBOARD_STATE=sensitive or a
   password-manager hint) get no source record.
-- Browser history: copy Chromium's `History` to $XDG_RUNTIME_DIR, read
-  `urls` (title, url, last_visit_time). Rows are keyed, indexed and shown
-  without the query string and fragment (tokens live there); only opening the
-  row uses the full URL. A source that fails to read keeps its existing rows.
+- Browser history: every profile of Chromium, Chrome, Brave and Edge
+  (`History` `urls` + `Bookmarks`) and of Firefox and Zen (`places.sqlite`
+  `moz_places`, with its `-wal`, which holds the latest visits), each copied
+  to $XDG_RUNTIME_DIR and read there, never live. The newest visit to a page
+  wins across browsers; rows say where they came from ("Chromium ·
+  example.com · 2 h ago") with that browser's icon. Rows are keyed, indexed
+  and shown without the query string and fragment (tokens live there); only
+  opening the row uses the full URL. A source that fails to read keeps its
+  existing rows.
 
 ## Answers
 
@@ -277,25 +289,39 @@ included). Agents can search clipboard and history too; `[[exclude]] kind =
 
 ## UI
 
-Opens instantly on Super+Space (keepLoaded menu plugin). One list:
-answer card on top, then rows with app icon, title, subtitle, snippet with
-highlighted words, and for media a strip of moment thumbnails on a timeline.
-Keys: type to search · ↑/↓ or Ctrl+N/P move · Enter open · Ctrl+Enter
-alternative (reveal in folder / copy path) · Tab into a row's hits (pages,
-moments), then ←/→ step them, Esc back · Ctrl+1…9 open row N · Ctrl+C copy
-answer or path · Esc close. The field edits like a macOS text field: ←/→,
-Shift to select, Ctrl or Alt for words, Super for line ends where Hyprland
-lets it through (ui/README.md). The wheel moves the list by the system's
-scroll lines, a touchpad by its own pixels, never a fling.
+Opens instantly on Super+Space (keepLoaded menu plugin). One joined panel
+(20 Oct: separate tiles felt disjointed), in the system's sans: the field,
+with Omarchy's mark where the rows have icons, then the answer card, then
+rows. A row's headline says why it matched: the matched passage in quotes,
+from its sentence with the most matched words, those words in bold, with the
+name and folder under it as the citation; otherwise the title over the
+subtitle. At its right is where Enter lands (p. 3, row 4, 0:13–0:27), large
+on the selected row. Pages, slides, lines and sheets are numbered chips;
+video and audio a timeline of the whole length with each section on it.
+Keys: type to search · the first ↓ (or ↑) picks the highlighted row, then
+↑/↓ or Ctrl+N/P move · Enter open · Ctrl+Enter alternative (reveal in
+folder / copy path) · ←/→ step the picked row's parts (pages, sections,
+emoji), and → at the end of the text does so for the top row (20 Oct: the
+arrows move the options, not the cursor; typing gives them back to the
+cursor) · Tab lists every part with its text · Ctrl+1…9
+open row N · Ctrl+C copy answer or path · Esc close. Otherwise the field
+edits like a macOS text field: ←/→, Shift to select, Ctrl or Alt for words,
+Super for line ends where Hyprland lets it through (ui/README.md). The wheel
+moves the list by the system's scroll lines, a touchpad by its own pixels,
+never a fling.
 
 Calm while typing (decided 18 Oct, after watching it type): the instant
-phase still updates on every keystroke, but rows keep their place and the
-selection stays on the same key; the daemon starts the meaning search only
+phase still updates on every keystroke, but rows keep their place and a
+chosen selection stays on the same key; the daemon starts the meaning search only
 after 150 ms with no newer query on that connection. Responses only add
 while typing: removals (rows dropping, the answer card going, "Nothing on this
 computer matches") wait until typing has paused 400 ms. A new answer takes the
-selection, and the empty notice never shows next to an answer. No
-fade-out/fade-in between updates.
+selection, and the empty notice never shows next to an answer. Until a key
+chooses a row, every response selects the top one (20 Oct). No
+fade-out/fade-in between updates. Keys that act on a row (Enter, Ctrl+1…9,
+Ctrl+C, Tab, ↑/↓, → at the end of the text) end the calm first and wait for
+the query's final phase, so they never act on a row left from an earlier
+query (19 Oct); with no daemon connected they act at once.
 
 Icons: apps use their own icon; files use the icon of the app that opens
 their mime type on this machine (`xdg-mime query default`); the web row uses
