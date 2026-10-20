@@ -5,7 +5,7 @@
 # clipboard history fixture goes in only when TARGET_HOME is not your real home.
 # Your real home also does not get the corpus's demo run sheet or the walkthrough
 # video: they spell out demo queries, so they would match them on stage (the
-# presenter's run sheet is demo/RUN-SHEET.md).
+# presenter keeps their run sheet outside the repo).
 set -euo pipefail
 src="$(cd "$(dirname "$0")" && pwd)/corpus"
 dest="${1:-$HOME/.cache/superspace-dev/home}"
