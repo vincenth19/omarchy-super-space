@@ -11,6 +11,7 @@ pub enum Kind {
     App,
     Setting,
     File,
+    Folder,
     Image,
     Video,
     Audio,

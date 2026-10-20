@@ -9,7 +9,7 @@ fn main() {
         let t = Instant::now();
         if arg == "--crawl" {
             let files = ss_files::crawl(&home);
-            eprintln!("crawl: {} files in {:.0} ms", files.len(), t.elapsed().as_secs_f64() * 1e3);
+            eprintln!("crawl: {} files and folders in {:.0} ms", files.len(), t.elapsed().as_secs_f64() * 1e3);
             files.iter().for_each(|f| println!("{}", f.display()));
             continue;
         }

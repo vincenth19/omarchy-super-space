@@ -42,7 +42,7 @@ Item {
   property var indexing: null   // the latest response's {done, total, stage}, while the daemon is still indexing
   property var filter: null     // the kinds the query's own words limit it to ("golden retriever video"), as the daemon read them
   readonly property string filterLabel: (filter || []).map(function(k) {
-    return ({ app: "Apps", setting: "Settings", file: "Text", image: "Photos", video: "Videos", audio: "Audio",
+    return ({ app: "Apps", setting: "Settings", file: "Text", folder: "Folders", image: "Photos", video: "Videos", audio: "Audio",
               clip: "Clipboard", emoji: "Emoji", history: "History", web: "Web" })[k] || k
   }).join(" + ")
   readonly property int offset: answer ? 1 : 0

@@ -647,6 +647,7 @@ fn kind_word(w: &str) -> Option<Kind> {
         "photo" | "image" | "picture" | "pic" | "screenshot" => Kind::Image,
         "audio" | "song" | "music" | "track" | "memo" | "recording" | "podcast" => Kind::Audio,
         "text" | "doc" | "document" | "file" | "pdf" | "note" => Kind::File,
+        "folder" | "directory" | "dir" => Kind::Folder,
         "app" | "application" => Kind::App,
         "setting" => Kind::Setting,
         "clipboard" => Kind::Clip,
@@ -669,13 +670,16 @@ pub fn type_words(q: &str) -> Option<(String, Vec<Kind>, bool, bool)> {
         kind_word(w[*i]).is_some() || ["and", "or", ","].contains(&w[*i]) || w[*i] == "voice" && w.get(i + 1).is_some_and(|t| t.trim_end_matches('s') == "memo")
     };
     let end = w.len() - (0..w.len()).rev().take_while(typeword).count();
+    // "music folder": all type words, so the ones before "folder" name it.
+    let folder = end == 0 && w.last().is_some_and(|t| kind_word(t) == Some(Kind::Folder));
+    let end = if folder { w.len() - 1 } else { end };
     // Apps and settings are called by kind words too ("settings audio", "apps files").
     let named = end == 0 && w.first().is_some_and(|t| t.ends_with('s') && matches!(kind_word(t), Some(Kind::App | Kind::Setting)));
     let end = if named { w.len() } else { end };
     let start = (0..end).take_while(typeword).count();
-    // "emoji" and "clipboard" are their own plurals ("emoji money").
-    let plural = w[..start].iter().take_while(|t| kind_word(t).is_none() || t.ends_with('s') || matches!(**t, "emoji" | "clipboard")).count();
-    let start = if named { 1 } else if w.get(start).is_some_and(|t| ["of", "about", "with", "from", "on", "where", "that"].contains(t)) { start } else { plural };
+    // These lead a search in the singular too ("emoji money", "folder camera", "dir camera").
+    let plural = w[..start].iter().take_while(|t| kind_word(t).is_none() || t.ends_with('s') || matches!(**t, "emoji" | "clipboard" | "folder" | "dir" | "directory")).count();
+    let start = if named { 1 } else if folder { 0 } else if w.get(start).is_some_and(|t| ["of", "about", "with", "from", "on", "where", "that"].contains(t)) { start } else { plural };
     let typed = || w[..start].iter().chain(&w[end..]);
     let mut kinds = Vec::new();
     for k in typed().filter_map(|t| kind_word(t)) {
@@ -741,7 +745,8 @@ fn asks_history(qn: &str) -> bool {
 
 /// The row for `key` as `q` with its type-word filter `f` ranks it (for activation); with `learn`,
 /// after learning from the pick: the picked row should beat every row shown above it (only rows
-/// the filter keeps were shown).
+/// the filter keeps were shown). Never from a folder: lacking a kind weight and meaning, its picks
+/// would only lower those for every query (the pick still counts for its prefix).
 pub fn pick(d: &Daemon, q: &str, f: Option<&Filter>, key: &str, qv: Option<&QVecs>, learn: bool) -> Result<Row> {
     let (q, kinds, pdf) = f.map_or((q, None, false), |f| (f.q.as_str(), Some(f.kinds.as_slice()), f.pdf));
     let mem = d.store.mem.read().unwrap();
@@ -750,7 +755,7 @@ pub fn pick(d: &Daemon, q: &str, f: Option<&Filter>, key: &str, qv: Option<&QVec
     ranked.retain(|x| x.0 == id || x.1.kept && wanted(&mem.items[&x.0], kinds, pdf));
     order(&mem, &mut ranked);
     let pos = ranked.iter().position(|x| x.0 == id).unwrap();
-    if learn && !norm(q).is_empty() && ranked[pos].1.kept && pos > 0 {
+    if learn && mem.items[&id].kind != Kind::Folder && !norm(q).is_empty() && ranked[pos].1.kept && pos > 0 {
         let mut w = d.weights.write().unwrap();
         let fp = ranked[pos].1.f;
         for (_, s) in ranked[..pos].iter().filter(|x| !x.1.pinned) {

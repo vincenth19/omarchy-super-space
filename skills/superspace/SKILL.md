@@ -49,7 +49,7 @@ superspace open file:Documents/lease.pdf                      # open it on the u
 `open` acts on the user's desktop (a PDF opens at the page, a video at the
 moment); use it only when they ask you to open something.
 
-Kinds: `app setting file image video audio clip emoji history`.
+Kinds: `app setting file folder image video audio clip emoji history`.
 
 A result row looks like:
 

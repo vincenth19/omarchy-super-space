@@ -37,7 +37,7 @@ _spec.loader.exec_module(bench)
 # Mirrors crates/superspace/src/search.rs and server.rs (the self-check below catches drift).
 FEATURES = ["name", "exact", "keyword", "meaning", "margin", "hub", "recency", "fresh", "frecency", "prefix", "boost", "prefer",
             "app", "setting", "file", "image", "video", "audio", "clip", "emoji", "history", "photo", "generic"]
-KINDS = FEATURES[12:21]
+KINDS = FEATURES[12:21] + ["folder"]  # folders (last) have no kind feature, nor meaning
 WEIGHTS = np.array([1.0, 0.2, 0.3, 0.9, 0.25, 0.2, 0.05, 0.03, 0.08, 0.3, 1.0, 0.05,
                     0.05, 0.03, 0.3, 0.05, 0.25, 0, -0.02, -0.03, -0.02, 0, 0])
 CUTOFFS = {"app": 0.70, "setting": 0.70, "file": 0.68, "image": 0.67, "video": 0.705, "audio": 0.655, "clip": 0.715,
@@ -49,7 +49,7 @@ F = {f: i for i, f in enumerate(FEATURES)}
 # count (DESIGN rule 3); kinds only nudge. Picks, boosts, prefer and history have no bench data;
 # fresh is ~1 for every item.
 BOUNDS = {"name": (0, 3), "exact": (0, 3), "keyword": (0.3, 3), "meaning": (0, 3), "margin": (0, 3), "hub": (0, 3),
-          "recency": (0, 0.3), "photo": (0, 3), "generic": (-2, 0), **{k: (-0.3, 0.3) for k in KINDS if k != "history"}}
+          "recency": (0, 0.3), "photo": (0, 3), "generic": (-2, 0), **{k: (-0.3, 0.3) for k in KINDS[:-1] if k != "history"}}
 TUNE = [F[f] for f in BOUNDS if f not in ("photo", "generic")]
 OPTIONS = ["plain", "photo", "generic", "photo+generic", "debias"]
 
@@ -185,7 +185,7 @@ def asks(qn):
 
 
 def featurize(P, cut, option):
-    kc = np.array([cut[k] for k in KINDS])[P["kind"]]
+    kc = np.array([cut.get(k, 1.0) for k in KINDS])[P["kind"]]
     rel = lambda c, cutoff: np.clip((c - cutoff) / SPAN, 0, 1)
     rt, ri, rp = rel(P["ct"], kc), rel(P["ci"], cut["frame"]), rel(P["cp"], cut["frame"])
     plain, best, pic = np.maximum(rt, ri), np.maximum(rt, rp), rp > rt
@@ -201,7 +201,7 @@ def featurize(P, cut, option):
     for f, v in (("name", name), ("exact", P["exact"]), ("keyword", P["kw"]), ("meaning", plain), ("margin", margin),
                  ("hub", hub), ("recency", P["recency"]), ("fresh", P["fresh"]), ("photo", best - plain)):
         X[:, F[f]] = v
-    X[np.arange(len(kc)), 12 + P["kind"]] = 1
+    X[:, 12:21] = np.eye(len(KINDS))[P["kind"], :-1]
     if "generic" in option and (g := pic & (best > 0)).any():
         X[g, F["generic"]] = P["gp"][g] - P["gp"][g].mean()
     P["X"], P["kept"] = X, (name > 0) | (P["kw"] > 0) | (best > 0)
@@ -264,7 +264,7 @@ def bounds(cases, Ps, margin):
     for c in (c for c in cases if c.get("empty")):
         P = Ps[c["q"]]
         for k, vals, mask in [("name", P["n"], ~P["exact"]), ("frame", P["cp"], np.ones(len(P["n"]), bool))] + \
-                             [(kd, P["ct"], P["kind"] == KINDS.index(kd)) for kd in KINDS]:
+                             [(kd, P["ct"], P["kind"] == KINDS.index(kd)) for kd in KINDS[:-1]]:
             if mask.any() and vals[mask].max() > lo[k]:
                 j = np.flatnonzero(mask)[vals[mask].argmax()]
                 lo[k], why[k] = float(vals[j]), (c["q"], int(P["ids"][j]))

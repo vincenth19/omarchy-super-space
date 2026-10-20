@@ -99,10 +99,12 @@ the query, or at its start when plural ("apps firefox", "settings audio") or
 before of/about/with/…, joined by and/or/,/&/only, filter by kind — video(s),
 photo(s)/image(s)/picture(s), audio/song(s)/music/(voice) memo(s),
 text/doc(s)/document(s)/pdf(s)/note(s), app(s), setting(s), clipboard, emoji,
-history/website(s). A singular one at the start is part of a name ("text
-editor", "emoji picker", "history essay"). The daemon strips them, filters, and
-reports `Response.filter` for the UI's chip; a client's own `kinds` wins. A
-query whose words start a name of something the filter would hide ("take a
+history/website(s), folder(s)/dir/directory ("music folder": the words before
+it name the folder). A singular one at the start is part of a name ("text
+editor", "history essay"), except emoji, clipboard, folder, dir and directory
+("emoji money", "folder camera"). The daemon strips them, filters, and reports
+`Response.filter` for the UI's chip; a client's own `kinds` wins. A query
+whose words start a name of something the filter would hide ("take a
 screenshot", "Settings Manager", "movies to watch" for movies-to-watch.md) is
 not filtered, and a filter that would leave nothing while an app or setting
 matches the words ("spotify music") falls back to no filter.
@@ -151,7 +153,8 @@ cosine, cosine margin over the next row and over the item's hub score, kind,
 modified-recency, frecency, picks for the typed prefix, preference boosts,
 similarity to `prefer` sentences. Starting weights are fitted on the bench;
 every activation then updates the user's weights online (pairwise: the picked
-row beats the rows shown above it), with picks decaying over a few weeks and a
+row beats the rows shown above it; not from a folder, which has no kind weight
+or meaning to weigh), with picks decaying over a few weeks and a
 short freshness boost for new items so habits cannot bury them. Weights live
 in `~/.local/state/superspace/weights.json`; `explain` shows each feature's
 contribution. A cross-encoder (Qwen3-Reranker-0.6B, top 5, after typing
@@ -194,7 +197,9 @@ CACHEDIR.TAG, Trash, lost+found; folders containing CACHEDIR.TAG, .nomedia or
 *.map`; binaries (NUL in first 8000 bytes); minified text (average line > 110
 chars). In git repos only gitignore-respecting files; source code is indexed by
 name, prose by content. Files over 50 MB: name only. At most 1 MiB of text
-per file. Do not follow symlinks. Rescan on inotify queue overflow.
+per file. Do not follow symlinks. Rescan on inotify queue overflow. Every
+folder the crawl goes into, the roots too, is a `folder` item found by name
+only (20 Oct): Enter opens it, Ctrl+Enter shows it in its parent.
 
 ## Extraction (no new packages)
 
@@ -327,8 +332,9 @@ the query's final phase, so they never act on a row left from an earlier
 query (19 Oct); with no daemon connected they act at once.
 
 Icons: apps use their own icon; files use the icon of the app that opens
-their mime type on this machine (`xdg-mime query default`); the web row uses
-the default browser's icon (`xdg-settings get default-web-browser`).
+their mime type on this machine (`xdg-mime query default`), folders the
+theme's `folder` icon; the web row uses the default browser's icon
+(`xdg-settings get default-web-browser`).
 
 Theme-agnostic: every colour, font, radius and transparency comes from
 Omarchy's shell theme (the same tokens Omarchy's own launcher and menus use,
