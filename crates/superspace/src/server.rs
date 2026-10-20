@@ -44,8 +44,6 @@ pub struct Daemon {
     pub heavy: Mutex<()>,
     pub embed_cv: (Mutex<()>, Condvar),
     pub watcher: Mutex<Option<notify::RecommendedWatcher>>,
-    /// The default browser's desktop id, for the web row's icon.
-    pub browser: RwLock<Option<String>>,
     /// `Store::queue` at most once a second for progress: with 50k parts pending it takes ~4.5 ms on a Pi.
     queued: Mutex<(Option<Instant>, usize, Option<i64>)>,
 }
@@ -105,7 +103,6 @@ impl Daemon {
             heavy: Mutex::new(()),
             embed_cv: (Mutex::new(()), Condvar::new()),
             watcher: Mutex::new(None),
-            browser: RwLock::new(None),
             queued: Mutex::new((None, 0, None)),
             cfg,
         });

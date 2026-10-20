@@ -86,9 +86,6 @@ pub mod ext {
     pub fn lrc_owner(lrc: &Path) -> Option<PathBuf> {
         (lrc.extension()? == "lrc").then(|| lrc.with_extension("mp3"))
     }
-    pub fn default_browser() -> Option<String> {
-        Some("firefox".into())
-    }
     pub fn file_doc(p: &Path, home: &Path) -> Option<Doc> {
         if p.is_dir() {
             return ss_files::doc(p, home);
@@ -763,10 +760,9 @@ fn picture_features_leave_files_and_apps_alone() {
 }
 
 #[test]
-fn kinds_alt_actions_and_the_browser_icon() {
+fn kinds_and_alt_actions() {
     let t = start(0, "");
     corpus(&t);
-    t.put(vec![Doc { icon: "firefox-icon".into(), ..doc("app:firefox", Kind::App, "Firefox", "Browse the web", &["web browser"]) }]);
     let search = |q: &str, kinds: Value| {
         let v = serde_json::to_value(t.d.handle(serde_json::from_value(json!({"op": "search", "id": 1, "q": q, "kinds": kinds})).unwrap())).unwrap();
         (v["rows"].as_array().unwrap().iter().map(|r| r["kind"].as_str().unwrap().to_string()).collect::<Vec<_>>(), v["empty"].as_bool().unwrap())
@@ -774,8 +770,6 @@ fn kinds_alt_actions_and_the_browser_icon() {
     assert_eq!(search("rent", json!(["file"])), (vec!["file".to_string()], false));
     assert_eq!(search("rent", json!(["app"])), (vec![], true));
     assert_eq!(search("rent", json!(["app", "web"])), (vec!["web".to_string()], true));
-    until("default browser", Duration::from_secs(2), || t.d.browser.read().unwrap().is_some());
-    assert_eq!(t.search("zxqv").0[0].icon, "firefox-icon", "the web row wears the default browser's icon");
     let alt = |key: &str| t.req(json!({"op": "activate", "id": 1, "key": key, "q": "rent", "alt": true}))["argv"].clone();
     assert_eq!(alt("file:Documents/lease.pdf"), json!(["xdg-open", "/home/u/Documents"]));
     assert_eq!(alt("app:terminal"), json!(["wl-copy", "--", "terminal"]));

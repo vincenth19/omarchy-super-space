@@ -22,13 +22,6 @@ pub mod ext {
     pub use ss_files::{crawl, crawl_dir, doc as file_doc, icon, roots, wanted_in};
     pub use ss_media::{doc as media_doc, forget, is_media, lrc_owner, quick_doc, stamp as media_stamp};
     pub use ss_sources::{apps, clips_checked, emoji, history_checked, settings, settings_checked, track_clip_sources, watch_paths};
-
-    /// The default browser's desktop id, without ".desktop".
-    pub fn default_browser() -> Option<String> {
-        let out = std::process::Command::new("xdg-settings").args(["get", "default-web-browser"]).output().ok()?;
-        let id = String::from_utf8_lossy(&out.stdout).trim().trim_end_matches(".desktop").to_string();
-        (!id.is_empty()).then_some(id)
-    }
 }
 #[cfg(test)]
 pub use crate::tests::ext;
@@ -85,7 +78,6 @@ pub fn start(d: &Arc<Daemon>) {
     let d2 = d.clone();
     std::thread::spawn(move || watch(d2, rx, sources));
     ext::track_clip_sources(&d.cfg.state);
-    run(|d| *d.browser.write().unwrap() = ext::default_browser());
     run(|d| loop {
         if let Some(r) = ss_answers::rates(&d.cfg.cache) {
             *d.rates.write().unwrap() = Some(r);

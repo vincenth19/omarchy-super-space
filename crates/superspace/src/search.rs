@@ -629,12 +629,7 @@ pub fn search(d: &Daemon, q: &str, limit: usize, qv: Option<&QVecs>, kinds: Opti
     let mut rows = rows(d, &mem, &ranked, q);
     let empty = rows.is_empty();
     if web {
-        let mut row = web_row(q);
-        // The default browser's own icon, from its indexed desktop entry.
-        if let Some(id) = d.browser.read().unwrap().as_ref().and_then(|b| mem.keys.get(&format!("app:{b}"))) {
-            row.icon = mem.items[id].icon.clone();
-        }
-        rows.push(row);
+        rows.push(web_row(q));
     }
     (rows, empty)
 }

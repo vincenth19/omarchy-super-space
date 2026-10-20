@@ -186,10 +186,18 @@ Column {
         anchors.centerIn: parent
         width: root.iconSize
         height: root.iconSize
-        source: root.emoji ? "" : root.iconSource
+        source: root.emoji || root.item.kind === "web" ? "" : root.iconSource
         sourceSize: Qt.size(width * Screen.devicePixelRatio, height * Screen.devicePixelRatio)
         fillMode: root.item.kind === "image" ? Image.PreserveAspectCrop : Image.PreserveAspectFit
         asynchronous: true
+      }
+      Text {  // the web row is a globe: a browser's icon is often a blurry bitmap
+        anchors.centerIn: parent
+        visible: root.item.kind === "web"
+        text: ""
+        color: root.ink
+        font.family: "JetBrainsMono Nerd Font"  // theme-ok: Omarchy's icon font, not a text style
+        font.pixelSize: root.iconSize
       }
     }
 
