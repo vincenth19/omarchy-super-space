@@ -428,6 +428,21 @@ Item {
           // Like Spotlight: another window taking the keyboard closes the box.
           onActiveFocusChanged: if (!activeFocus && root.opened) root.close()
           Keys.onPressed: function(event) { if (root.press(event.key, event.modifiers)) event.accepted = true }
+          // The built-in caret blinks on while it moves, so it can vanish mid-move; this one stays lit until it rests.
+          cursorDelegate: Rectangle {
+            id: caret
+            width: Math.max(1, Style.space(2))
+            color: Commons.Color.menu.text
+            visible: field.activeFocus && !field.selectedText
+            Timer {
+              id: blink
+              interval: Qt.styleHints.cursorFlashTime / 2
+              running: field.activeFocus && interval > 0
+              repeat: true
+              onTriggered: caret.opacity = 1 - caret.opacity
+            }
+            Connections { target: field; function onCursorPositionChanged() { caret.opacity = 1; blink.restart() } }
+          }
 
           Text {  // Omarchy's mark, where the rows have their icons; dim until something is typed
             x: Style.spacing.rowPaddingX
