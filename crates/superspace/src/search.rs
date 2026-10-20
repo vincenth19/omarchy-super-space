@@ -657,10 +657,13 @@ fn kind_word(w: &str) -> Option<Kind> {
 }
 
 /// Type words at the end of the query ("golden retriever video", "breakup songs", "… audio and
-/// text"), or at its start before "of", "about", … ("photos of the beach"; "text editor" and "app
-/// idea" stay whole), and "only" anywhere: the rest of the query, the kinds asked for and whether
-/// the files asked for are PDFs. None when nothing else is left.
-pub fn type_words(q: &str) -> Option<(String, Vec<Kind>, bool)> {
+/// text"), or at its start when plural or before "of", "about", … ("apps firefox", "settings wifi",
+/// "photos of the beach"): a singular one is part of a name ("text editor", "app idea" and "video
+/// call" stay whole), and of the words nobody pluralizes only "emoji" and "clipboard" lead
+/// ("music player", "history essay" and "audio mixer" stay whole); and "only" anywhere: the rest of
+/// the query, the kinds asked for, whether the files asked for are PDFs and whether type words
+/// lead. None when nothing else is left.
+pub fn type_words(q: &str) -> Option<(String, Vec<Kind>, bool, bool)> {
     let lower = q.to_lowercase().replace([',', '&'], " , ");
     let w: Vec<&str> = lower.split_whitespace().filter(|t| *t != "only").collect();
     // "voice memos" is one type word.
@@ -669,7 +672,8 @@ pub fn type_words(q: &str) -> Option<(String, Vec<Kind>, bool)> {
     };
     let end = w.len() - (0..w.len()).rev().take_while(typeword).count();
     let start = (0..end).take_while(typeword).count();
-    let start = if w.get(start).is_some_and(|t| ["of", "about", "with", "from", "on", "where", "that"].contains(t)) { start } else { 0 };
+    let plural = w[..start].iter().all(|t| kind_word(t).is_none() || t.ends_with('s') || ["emoji", "clipboard"].contains(t));
+    let start = if plural || w.get(start).is_some_and(|t| ["of", "about", "with", "from", "on", "where", "that"].contains(t)) { start } else { 0 };
     let typed = || w[..start].iter().chain(&w[end..]);
     let mut kinds = Vec::new();
     for k in typed().filter_map(|t| kind_word(t)) {
@@ -678,7 +682,7 @@ pub fn type_words(q: &str) -> Option<(String, Vec<Kind>, bool)> {
         }
     }
     let pdf = kinds.contains(&Kind::File) && typed().all(|t| kind_word(t) != Some(Kind::File) || t.starts_with("pdf"));
-    (!kinds.is_empty() && start < end).then(|| (w[start..end].join(" "), kinds, pdf))
+    (!kinds.is_empty() && start < end).then(|| (w[start..end].join(" "), kinds, pdf, start > 0))
 }
 
 /// What type words ask for: names and keywords match `q`, meaning `meant`, and only rows of `kinds`
@@ -702,17 +706,18 @@ fn matched(d: &Daemon, mem: &Mem, q: &str, only: impl Fn(&Item) -> bool) -> bool
 /// the whole query ("take a screenshot" is the Screenshot setting, "bluetooth audio" the Hardware
 /// setting's words) or nothing the filter keeps matches ("spotify music", "docker image"). Fuzzy
 /// names are matched against apps and settings, and only then against what the filter keeps: about
-/// 1 ms on a Pi. Apps and settings go by their type word ("display settings", "Web App"), so names
-/// and keywords match all of the query for them. Pictures have no "photo" or "video" in their meaning, so for them the type words are
+/// 1 ms on a Pi. Apps and settings go by a trailing type word ("display settings", "Web App"), so
+/// names and keywords match all of the query for them, unless type words lead ("settings wifi" is
+/// named "wifi"). Pictures have no "photo" or "video" in their meaning, so for them the type words are
 /// not embedded either; songs and documents read like what they are ("breakup songs" finds the
 /// breakup songs, "breakup" a song titled "After You've Gone").
 pub fn filter(d: &Daemon, q: &str) -> Option<Filter> {
-    let (rest, kinds, pdf) = type_words(q)?;
+    let (rest, kinds, pdf, lead) = type_words(q)?;
     let mem = d.store.mem.read().unwrap();
     let wants = |it: &Item| wanted(it, Some(&kinds), pdf);
     let command = |it: &Item| matches!(it.kind, Kind::App | Kind::Setting) && !wants(it);
     let called = |it: &Item| std::iter::once(&it.title).chain(&it.names).any(|n| n.eq_ignore_ascii_case(q.trim()));
-    let named = if kinds.iter().all(|k| matches!(k, Kind::App | Kind::Setting)) { q.to_string() } else { rest.clone() };
+    let named = if !lead && kinds.iter().all(|k| matches!(k, Kind::App | Kind::Setting)) { q.to_string() } else { rest.clone() };
     if mem.items.values().any(|it| !wants(it) && called(it))
         || matched(d, &mem, &rest, command) && (matched(d, &mem, q, command) || !matched(d, &mem, &named, wants))
     {

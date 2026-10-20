@@ -917,15 +917,13 @@ fn media_hits_are_sections_that_take_in_moments_just_under_the_cutoff() {
 #[test]
 fn type_words_filter_by_kind_unless_they_name_what_the_filter_hides() {
     let words = |q: &str| search::type_words(q);
-    let s = |q: &str, k: &[Kind]| Some((q.to_string(), k.to_vec(), false));
+    let s = |q: &str, k: &[Kind]| Some((q.to_string(), k.to_vec(), false, false));
     assert_eq!(words("golden retriever video"), s("golden retriever", &[Kind::Video]));
     assert_eq!(words("only golden retriever video"), s("golden retriever", &[Kind::Video]));
     assert_eq!(words("Golden Retriever audio and text"), s("golden retriever", &[Kind::Audio, Kind::File]));
     assert_eq!(words("dog photos, films & voice memos"), s("dog", &[Kind::Image, Kind::Video, Kind::Audio]));
-    assert_eq!(words("songs about a breakup"), s("about a breakup", &[Kind::Audio]));
-    assert_eq!(words("pdfs only lease"), None, "at the start only before of, about, …");
-    assert_eq!(words("lease pdf only"), Some(("lease".into(), vec![Kind::File], true)), "PDFs, not any file");
-    assert_eq!(words("invoice memo pdf"), Some(("invoice".into(), vec![Kind::Audio, Kind::File], true)), "voice memo is two words");
+    assert_eq!(words("lease pdf only"), Some(("lease".into(), vec![Kind::File], true, false)), "PDFs, not any file");
+    assert_eq!(words("invoice memo pdf"), Some(("invoice".into(), vec![Kind::Audio, Kind::File], true, false)), "voice memo is two words");
     assert_eq!(words("lease pdfs or docs"), s("lease", &[Kind::File]), "docs are any file");
     assert_eq!(words("awkward emoji"), s("awkward", &[Kind::Emoji]));
     for q in ["text editor", "photo viewer", "music player", "app idea for watering plants", "website redesign invoice", "screenshot",
@@ -973,6 +971,44 @@ fn type_words_filter_by_kind_unless_they_name_what_the_filter_hides() {
     t.req(json!({"op": "activate", "id": 2, "key": "file:Documents/puppy.txt", "q": "puppy"}));
     picked(2);
     assert_ne!(*t.d.weights.read().unwrap(), w0, "under the app");
+}
+
+#[test]
+fn leading_plural_type_words_scope_the_search_and_singular_ones_stay_whole() {
+    let led = |q: &str, k: &[Kind], pdf: bool| Some((q.to_string(), k.to_vec(), pdf, true));
+    for (q, k) in [("apps firefox", Kind::App), ("settings wifi", Kind::Setting), ("files lease", Kind::File), ("docs lease", Kind::File),
+        ("photos beach", Kind::Image), ("videos dog", Kind::Video), ("songs breakup", Kind::Audio), ("voice memos groceries", Kind::Audio),
+        ("emoji happy", Kind::Emoji), ("clipboard lease", Kind::Clip), ("websites github", Kind::History)] {
+        assert_eq!(search::type_words(q), led(q.rsplit(' ').next().unwrap(), &[k], false), "{q}");
+    }
+    assert_eq!(search::type_words("pdfs only lease"), led("lease", &[Kind::File], true));
+    assert_eq!(search::type_words("apps and settings wifi"), led("wifi", &[Kind::App, Kind::Setting], false));
+    assert_eq!(search::type_words("songs about a breakup"), led("about a breakup", &[Kind::Audio], false));
+    for q in ["photo editor", "video call", "image viewer", "app idea", "history essay", "music festival tickets", "audio mixer", "footage review"] {
+        assert_eq!(search::type_words(q), None, "{q}: singular, or a word nobody pluralizes");
+    }
+    let t = start(0, "");
+    corpus(&t);
+    t.put(vec![
+        doc("setting:network", Kind::Setting, "Network", "wireless connections", &["wifi"]),
+        doc("setting:monitors", Kind::Setting, "Monitors", "resolution and scale", &["display settings"]),
+        doc("app:settings", Kind::App, "Settings Manager", "configure the desktop", &[]),
+        doc("file:Documents/lease-notes.md", Kind::File, "lease-notes.md", "questions about the lease", &[]),
+    ]);
+    let search = |q: &str| {
+        let v = serde_json::to_value(t.d.handle(serde_json::from_value(json!({"op": "search", "id": 1, "q": q})).unwrap())).unwrap();
+        (v["filter"].clone(), v["rows"].as_array().unwrap().iter().map(|r| r["key"].as_str().unwrap().to_string()).collect::<Vec<_>>())
+    };
+    let keys = |k: &[&str]| k.iter().map(|k| k.to_string()).collect::<Vec<_>>();
+    assert_eq!(search("apps firefox"), (json!(["app"]), keys(&["app:firefox", "web:apps firefox"])));
+    assert_eq!(search("settings wifi"), (json!(["setting"]), keys(&["setting:network", "web:settings wifi"])), "named wifi, not settings wifi");
+    assert_eq!(search("pdfs lease"), (json!(["file"]), keys(&["file:Documents/lease.pdf", "web:pdfs lease"])), "PDFs only");
+    let named = search::filter(&t.d, "display settings").map(|f| f.q);
+    assert_eq!(named.as_deref(), Some("display settings"), "a trailing type word is part of names");
+    for q in ["settings manager", "settings manag"] {
+        let (filter, rows) = search(q);
+        assert_eq!((filter, rows[0].as_str()), (Value::Null, "app:settings"), "{q}: an app the filter would hide is called that");
+    }
 }
 
 #[test]
