@@ -14,7 +14,9 @@ breaks it on purpose, so `tests/run --self-test` can prove each check fails
 when it should: slow, no-instant, web-first, pad, wrong-locator (also the
 snippet), near-miss, thin-margin, prefs-noop, parity, slow-index, ui-stuck,
 one-section (only a row's best hit), no-filter (type words searched as plain
-words), greedy-filter (a filter on every query).
+words), greedy-filter (a filter on every query), plain-subtitle (no "Song" or
+"Recording" in subtitles), old-arrows (Left/Right step hits only after Tab, as
+in v0.1.1), sticky-arrows (they keep stepping hits after typing).
 'wait' is not a fault: finals come 300 ms late and say so in timing.wait_ms, as
 the real daemon's typing pause does.
 """
@@ -42,7 +44,7 @@ def norm(q):
 
 def example(regex):
     """A literal string matching one of the simple title regexes in golden.json."""
-    s = re.sub(r"\(\?i\)|\\b|\?", "", regex).split("|")[0]
+    s = re.sub(r"\(\?i\)|\\b|\?|\^", "", regex).split("|")[0]
     return s.replace("\\.", ".").replace("\\", "")
 
 
@@ -80,7 +82,7 @@ def oracle_rows(cases):
             hits = hits[:1]
         kind = want.get("kind") or (key.split(":")[0] if not key.startswith("file:") else KIND_BY_EXT.get(pathlib.Path(key).suffix, "file"))
         rows.append({"key": key, "kind": kind, "title": example(want["title"]) if "title" in want else key.rsplit("/", 1)[-1],
-                     "subtitle": "", "icon": "text-x-generic", "action": {"type": "open", "path": key, "locator": {}},
+                     "subtitle": "" if "plain-subtitle" in FAULTS else example(c.get("subtitle", "")), "icon": "text-x-generic", "action": {"type": "open", "path": key, "locator": {}},
                      "score": round(0.9 - 0.01 * len(rows), 3), "why": "meaning", "hits": hits,
                      "snippet": {"text": "" if "wrong-locator" in FAULTS else example(c.get("snippet", "")), "marks": []}})
     return rows
@@ -268,13 +270,16 @@ def ui(fn, arg):
               "theme": {"background": colors.get("background"), "text": colors.get("foreground")}}
     elif fn == "key" and "ui-stuck" not in FAULTS:
         n, name = len(st["rows"]), arg.lower()
-        if name in ("down", "ctrl+n"):
+        if name in ("down", "ctrl+n", "up", "ctrl+p") and not st.get("nav"):
+            st["nav"] = True  # the first Down/Up picks the highlighted row; Left/Right then step its hits
+        elif name in ("down", "ctrl+n"):
             st["selected"] = min(st["selected"] + 1, n - 1)
         elif name in ("up", "ctrl+p"):
             st["selected"] = max(st["selected"] - 1, 0)
         elif name == "tab":
             st["expanded"], st["mode"] = True, "sections"
-        elif name in ("right", "left"):
+        elif name in ("right", "left") and (st.get("mode") == "sections" or "sticky-arrows" in FAULTS
+                                              or st.get("nav") and "old-arrows" not in FAULTS):
             hits = st["rows"][st["selected"]]["hits"] if n else 0
             st["hit"] = max(0, min(st["hit"] + (1 if name == "right" else -1), hits - 1))
         elif name == "escape" and st.get("mode") == "sections":

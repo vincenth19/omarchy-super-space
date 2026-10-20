@@ -2,3 +2,4 @@ target/
 *.gguf
 demo/corpus/
 tests/reports/
+__pycache__/

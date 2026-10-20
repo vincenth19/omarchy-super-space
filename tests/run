@@ -4,10 +4,11 @@
   tests/run                       everything, against the running daemon
   tests/run --only golden,live    some sections: golden budgets prefs parity live ui theme
   tests/run --tags demo           only golden cases with one of these tags
+  tests/run --skip-tags after-0.1.1   not those (cases for a daemon newer than v0.1.1)
   tests/run --demo                the demo script's queries in order, one pass/fail table (before going on stage)
   tests/run --self-test           prove the bench catches faults, using tests/fake_daemon.py
 
-Environment: SUPERSPACE_SOCK (default $XDG_RUNTIME_DIR/superspace.sock),
+Environment: SUPERSPACE_SOCK (--sock sets it, for the CLI too; default $XDG_RUNTIME_DIR/superspace.sock),
 SUPERSPACE_BIN (CLI command, default `superspace`), SUPERSPACE_IPC (UI IPC
 command prefix, default `omarchy-shell superspace`), SUPERSPACE_HOME (the
 daemon's home when its status does not say). The theme is read from the desktop
@@ -255,13 +256,16 @@ def check_case(c, res):
             probs.append(f"no row with {describe(c['want'])} among {len(local)} results; top: {top}")
         elif rank > allowed:
             above = ", ".join(r.get("key", "?") for r in local[:rank - 1][:3])
-            probs.append(f"{describe(c['want'])} at rank {rank}, want <= {allowed}; above it: {above}")
+            clip = any(r.get("kind") == "clip" for r in local[:rank - 1])
+            probs.append(("a clipboard entry is above it (clear the clipboard history); " if clip else "")
+                         + f"{describe(c['want'])} at rank {rank}, want <= {allowed}; above it: {above}")
         else:
             row = local[rank - 1]
             snip = (row.get("snippet") or {}).get("text", "")
             for why in (locator_problem(row, c["at"]) if "at" in c else "", absent_problem(row, c["absent"]) if "absent" in c else "",
                         sections_problem(row, c["sections"]) if "sections" in c else "",
-                        f"right row, but its snippet {snip[:80]!r} does not show {c['snippet']!r}" if "snippet" in c and not re.search(c["snippet"], snip) else ""):
+                        f"right row, but its snippet {snip[:80]!r} does not show {c['snippet']!r}" if "snippet" in c and not re.search(c["snippet"], snip) else "",
+                        f"right row, but its subtitle {row.get('subtitle')!r} does not match {c['subtitle']!r}" if "subtitle" in c and not re.search(c["subtitle"], row.get("subtitle") or "") else ""):
                 if why:
                     probs.append(why)
     return probs, rank
@@ -287,7 +291,7 @@ def golden(rep, conn, cfg):
         if cfg.tags and not set(cfg.tags) & set(c.get("tags", [])):
             continue
         name = f"golden:{c['id']}"
-        if skip := missing_need(c, cfg.home):
+        if skip := next((f"tagged {t} (--skip-tags)" for t in c.get("tags", []) if t in cfg.skip_tags), "") or missing_need(c, cfg.home):
             rep.add(name, False, skip=skip)
             continue
         res = conn.search(c["q"])
@@ -603,38 +607,59 @@ def ui(rep, conn, cfg):
 
     def step(name, ok, why):
         rep.add(f"ui:{name}", ok, why)
+
+    def right_left(name, when, hits):
+        """Right/Left move off the best hit (0) and back. Hits are stepped in drawn (page/time)
+        order from the best one; when the best is drawn last, Right cannot move, so try Left first."""
+        if (len(hits) if isinstance(hits, list) else hits or 0) < 2:
+            return rep.add(f"ui:{name}", False, skip=f"the top row has {hits} hits; Right/Left need 2")
+        for there, back in (("Right", "Left"), ("Left", "Right")):
+            ipc("key", there)
+            if (h := state().get("hit")) != 0:
+                break
+        ipc("key", back)
+        step(name, h not in (0, None) and state().get("hit") == 0,
+             f"{when}, {there} should move off the best hit (0) and {back} return to it; got {h} then {state().get('hit')}")
     try:
         s, ms = open_and_wait("apartment lease bond", LEASE)
         step("open", ms is not None, f"open('apartment lease bond') did not show {LEASE} first within 3 s; state: {json.dumps(s)[:300]}")
         rep.data["ui_open_ms"] = ms
         step("selected-starts-at-0", s.get("selected") == 0, f"selected is {s.get('selected')} after open, want 0")
         last, sel = len(s.get("rows", [])) - 1, 0
-        for key, move in (("Down", 1), ("ctrl+n", 1), ("Up", -1), ("ctrl+p", -1)):
+        for key, move in (("Down", 0), ("ctrl+n", 1), ("Up", -1), ("ctrl+p", -1)):  # the first Down picks the highlighted row
             sel = max(0, min(last, sel + move))
             ipc("key", key)
             got = state().get("selected")
             step(f"key-{key}", got == sel, f"after {key} selected is {got}, want {sel} ({last + 1} rows, no wrap-around)")
+        # Once Down/Up have moved in the list, Right/Left step the selected row's hits, not the
+        # text cursor. Bench keys go through the keyboard's own handler, so a key that steps a
+        # hit never reaches the field: the cursor stays put.
+        hits = (s.get("rows") or [{}])[0].get("hits", 0)
+        right_left("key-Right-Left-after-Down", "after Down and Up (no Tab)", hits)
         ipc("key", "Tab")
         step("key-Tab", state().get("expanded") is True, "Tab did not expand the selected row's hits")
-        hits = (s.get("rows") or [{}])[0].get("hits", 0)
-        if (len(hits) if isinstance(hits, list) else hits or 0) < 2:
-            rep.add("ui:key-Right-Left", False, skip=f"the top row has {hits} hits; Right/Left need 2")
-        else:
-            # Hits are stepped in drawn (page/time) order from the best one, hit 0;
-            # when the best is drawn last, Right cannot move, so try Left first.
-            for there, back in (("Right", "Left"), ("Left", "Right")):
-                ipc("key", there)
-                if (h := state().get("hit")) != 0:
-                    break
-            ipc("key", back)
-            step("key-Right-Left", h not in (0, None) and state().get("hit") == 0,
-                 f"{there} should move off the best hit (0) and {back} return to it; got {h} then {state().get('hit')}")
+        right_left("key-Right-Left", "after Tab", hits)
         # In sections mode the first Escape returns to the field; the second closes.
         ipc("key", "Escape")
         step("key-Escape-sections", state().get("mode", "text") == "text" and state().get("open") is True,
              "Escape in sections mode should return to the field, not close")
         ipc("key", "Escape")
         step("key-Escape", state().get("open") is False, "Escape did not close the search box")
+        # Typing gives Right/Left back to the text cursor; after Down, Escape still closes.
+        open_and_wait("apartment lease bond", LEASE)
+        ipc("key", "Down")
+        ipc("key", "Up")
+        s, ms = open_and_wait("two thousand four hundred dollars", LEASE)
+        got = []
+        for k in ("Right", "Left"):
+            ipc("key", k)
+            got.append(state().get("hit"))
+        step("key-Right-after-typing", ms is not None and got == [s.get("hit")] * 2,
+             f"after Down, Up and typing, Right and Left should move the text cursor, not step the hits; hit {s.get('hit')} became {got}"
+             if ms is not None else f"typing a new query did not show {LEASE} first within 3 s")
+        for k in ("Down", "Right", "Escape"):
+            ipc("key", k)
+        step("key-Escape-after-Down", state().get("open") is False, "Escape after Down and Right (no Tab) should close the box, as before")
         s, _ = open_and_wait("awkward")
         step("emoji", (s.get("rows") or [{}])[0].get("key") == "emoji:😬", f"'awkward' top row is {(s.get('rows') or [{}])[0].get('key')}")
         s, _ = open_and_wait("15% of 80")
@@ -869,11 +894,13 @@ def run(cfg):
 
 def config(args):
     sock = args.sock or os.environ.get("SUPERSPACE_SOCK") or os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "superspace.sock")
+    os.environ["SUPERSPACE_SOCK"] = sock  # so the CLI and MCP (parity) ask the same daemon
     bin_ = shlex.split(os.environ.get("SUPERSPACE_BIN", "")) or (["superspace"] if shutil.which("superspace") else None)
     ipc = shlex.split(os.environ.get("SUPERSPACE_IPC", "omarchy-shell superspace"))
     home = args.home or os.environ.get("SUPERSPACE_HOME")
     return argparse.Namespace(sock=sock, bin=bin_, ipc=ipc, home=pathlib.Path(home).expanduser() if home else None,
                               only=args.only.split(",") if args.only else None, tags=args.tags.split(",") if args.tags else None,
+                              skip_tags=args.skip_tags.split(",") if args.skip_tags else [],
                               themes=args.themes.split(",") if args.themes else [], ui_actions=args.ui_actions,
                               allow_home_writes=args.allow_home_writes, out=pathlib.Path(args.out))
 
@@ -894,9 +921,12 @@ FAULTS = {  # fault -> regex one failed check must match; "" must pass everythin
     "parity": r"^parity:cli:",
     "slow-index": r"^live:add$",
     "ui-stuck": r"^ui:key-",
+    "old-arrows": r"^ui:key-Right-Left-after-Down$",
+    "sticky-arrows": r"^ui:key-Right-after-typing$",
     "one-section": r"^golden:demo-golden-video$",
     "no-filter": r"^golden:filter-",
     "greedy-filter": r"^golden:guard-",
+    "plain-subtitle": r"^golden:subtitle-",
 }
 
 
@@ -932,7 +962,7 @@ def self_test(args):
                         break
                     time.sleep(0.1)
                 cfg = argparse.Namespace(sock=sock, bin=[py, fake], ipc=[py, fake, "ui"], home=home, only=None,
-                                         tags=None if fault == "" else ["demo", "no-results", "filter"], themes=[], ui_actions=True,
+                                         tags=None if fault == "" else ["demo", "no-results", "filter", "after-0.1.1"], skip_tags=[], themes=[], ui_actions=True,
                                          allow_home_writes=False, out=tmp / "reports")
                 t0 = now()
                 rep, path = run(cfg)
@@ -959,6 +989,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--only", help="comma list of sections: " + " ".join(SECTIONS))
     ap.add_argument("--tags", help="only golden cases with one of these tags")
+    ap.add_argument("--skip-tags", help="skip golden cases with one of these tags (after-0.1.1 against a v0.1.1 daemon)")
     ap.add_argument("--sock")
     ap.add_argument("--home", help="the daemon's home, when its status does not report it")
     ap.add_argument("--themes", help="opt-in: switch the live theme to each of these and screenshot the UI")
