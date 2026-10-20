@@ -99,9 +99,9 @@ pub fn file_key(home: &Path, p: &Path) -> String {
     format!("file:{}", p.strip_prefix(home).unwrap_or(p).display())
 }
 
-/// "mtime:size": an unchanged file is never read again (stored with ss-files' version, see `files_version`).
+/// "mtime:size": an unchanged file or folder is never read again (stored with ss-files' version, see `files_version`).
 fn file_stamp(p: &Path) -> Option<(String, i64)> {
-    let m = std::fs::symlink_metadata(p).ok().filter(|m| m.is_file())?;
+    let m = std::fs::symlink_metadata(p).ok().filter(|m| m.is_file() || m.is_dir())?;
     let mtime = m.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
     Some((format!("{}:{}", mtime.as_nanos(), m.len()), mtime.as_secs() as i64))
 }
@@ -133,9 +133,9 @@ fn background() {
     }
 }
 
-/// Under a root ($HOME itself: files at the top level only), not excluded, and wanted by ss-files.
+/// A root or under one ($HOME itself: files at the top level only), not excluded, and wanted by ss-files.
 fn wanted(d: &Daemon, p: &Path, dir: bool) -> bool {
-    let Some(root) = d.roots.iter().find(|r| p.starts_with(r) && p != r.as_path()) else { return false };
+    let Some(root) = d.roots.iter().find(|r| p.starts_with(r)) else { return false };
     (*root != d.cfg.home || (!dir && p.parent() == Some(root))) && !excluded(d, p) && ext::wanted_in(p, &d.cfg.home)
 }
 
@@ -239,7 +239,7 @@ fn files_version(d: &Daemon) -> &'static str {
     })
 }
 
-/// Index one file if it changed. Media goes to the slow queue; a new one is
+/// Index one file or folder if it changed. Media goes to the slow queue; a new one is
 /// findable by name at once through its quick Doc (no parts).
 fn index_file(d: &Daemon, p: &Path, known: Option<&String>, batch: &mut Vec<(Doc, String, i64)>) {
     let Some((stamp, mtime)) = file_stamp(p) else { return };
@@ -331,15 +331,8 @@ fn rescan(d: &Daemon) {
     let seen: HashSet<String> = files.iter().map(|p| file_key(&d.cfg.home, p)).collect();
     let gone: Vec<String> = known.into_keys().filter(|k| !seen.contains(k)).collect();
     forget(d, &gone, &[]);
-    // Folders holding wanted files are wanted; only the others are asked.
-    let mut dirs = HashSet::new();
-    for f in &files {
-        for a in f.ancestors().skip(1) {
-            if !dirs.insert(a.to_path_buf()) {
-                break;
-            }
-        }
-    }
+    // Crawled folders are wanted; only the others are asked.
+    let dirs: HashSet<PathBuf> = files.into_iter().collect();
     for r in &d.roots {
         watch_tree(d, r, &dirs);
     }
@@ -382,7 +375,6 @@ fn sync_paths(d: &Daemon, paths: BTreeSet<PathBuf>) {
         match std::fs::symlink_metadata(&p) {
             Ok(m) if m.is_dir() && wanted(d, &p, true) => new_dirs.push(p),
             Ok(m) if m.is_file() && wanted(d, &p, false) => index_file(d, &p, known.get(&key), &mut batch),
-            Ok(m) if m.is_dir() => gone_dirs.push(key + "/"),
             _ => {
                 gone_dirs.push(key.clone() + "/");
                 gone.push(key);

@@ -98,7 +98,7 @@ Type words (decided 19 Oct): kind words at the end of the query (or at the
 start before of/about/with/…), joined by and/or/,/&/only, filter by kind —
 video(s), photo(s)/image(s)/picture(s), audio/song(s)/music/(voice) memo(s),
 text/doc(s)/document(s)/pdf(s)/note(s), app(s), setting(s), clipboard, emoji,
-history/website(s). The daemon strips them, filters, and reports
+history/website(s), folder(s)/directory. The daemon strips them, filters, and reports
 `Response.filter` for the UI's chip; a client's own `kinds` wins. A query that
 is itself the name of something the filter would hide ("photo viewer", "text
 editor") is not filtered, and a filter that would leave nothing while an app or
@@ -191,7 +191,9 @@ CACHEDIR.TAG, Trash, lost+found; folders containing CACHEDIR.TAG, .nomedia or
 *.map`; binaries (NUL in first 8000 bytes); minified text (average line > 110
 chars). In git repos only gitignore-respecting files; source code is indexed by
 name, prose by content. Files over 50 MB: name only. At most 1 MiB of text
-per file. Do not follow symlinks. Rescan on inotify queue overflow.
+per file. Do not follow symlinks. Rescan on inotify queue overflow. Every
+folder the crawl goes into, the roots too, is a `folder` item found by name
+only (20 Oct): Enter opens it, Ctrl+Enter shows it in its parent.
 
 ## Extraction (no new packages)
 

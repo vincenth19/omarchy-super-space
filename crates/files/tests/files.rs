@@ -116,8 +116,9 @@ fn exclusion_rules_and_crawl_agree() {
     std::os::unix::fs::symlink(docs.join("notes.md"), docs.join("link.md")).unwrap();
     std::os::unix::fs::symlink(h.join("Other"), docs.join("linkdir")).unwrap();
 
+    // Every folder crawl goes into is found too, the root included.
     let found: BTreeSet<PathBuf> = crawl(&h).into_iter().collect();
-    let want: BTreeSet<PathBuf> = keep.iter().map(|(p, _)| h.join(p)).collect();
+    let want: BTreeSet<PathBuf> = keep.iter().map(|(p, _)| *p).chain(["Documents", "Documents/sub", "Documents/sub/deeper"]).map(|p| h.join(p)).collect();
     assert_eq!(found, want);
     let wanted = |p: &Path| wanted_in(p, &h);
     for (p, _) in keep {
@@ -152,9 +153,9 @@ fn home_and_roots_inside_dot_folders() {
     }
     assert!(wanted_in(&music.join("lyrics.txt"), &h) && !wanted_in(&h.join("Documents/.hidden/x.md"), &h));
     let mut want = files.to_vec();
-    want.push(music.join("lyrics.txt"));
+    want.extend([music.join("lyrics.txt"), music.clone(), h.join("Documents"), h.join("Documents/deep")]);
     assert_eq!(crawl(&h).into_iter().collect::<BTreeSet<_>>(), want.into_iter().collect());
-    assert_eq!(crawl_dir(&h.join("Documents/deep"), &h), [h.join("Documents/deep/plan.txt")]);
+    assert_eq!(crawl_dir(&h.join("Documents/deep"), &h), [h.join("Documents/deep"), h.join("Documents/deep/plan.txt")]);
     // An opt-out marker in home itself still stops everything.
     put(&h.join(".noindex"), "");
     assert!(!wanted_in(&files[0], &h) && crawl(&h).is_empty() && crawl_dir(&h.join("Documents"), &h).is_empty());
@@ -193,15 +194,17 @@ fn git_repos_respect_gitignore() {
     git(&repo, &["add", "README.md", "src/main.rs", ".gitignore"]);
     git(&repo, &["commit", "-q", "-m", "x"]);
 
-    let found: BTreeSet<PathBuf> = crawl(&h).into_iter().collect();
+    let found: BTreeSet<PathBuf> = crawl(&h).into_iter().filter(|p| p.is_file()).collect();
     let want: BTreeSet<PathBuf> = ["README.md", "src/main.rs", "notes/todo.md", "vendor/inner/doc.md"].iter().map(|p| repo.join(p)).collect();
     assert_eq!(found, want);
+    let folders: BTreeSet<PathBuf> = crawl(&h).into_iter().filter(|p| p.is_dir()).collect();
+    assert_eq!(folders, ["", "app", "app/notes", "app/src", "app/vendor", "app/vendor/inner"].map(|d| h.join("Projects").join(d)).into(), "not target/");
     for (p, _) in files.iter().filter(|(p, _)| !p.ends_with(".gitignore")) {
         assert_eq!(wanted_in(&repo.join(p), &h), want.contains(&repo.join(p)), "wanted({p})");
     }
     assert!(!wanted_in(&repo.join("target"), &h) && wanted_in(&repo.join("src"), &h));
     // A folder inside a repo, or holding one, keeps what crawl keeps there.
-    let dir = |d: &str| crawl_dir(&repo.join(d), &h).into_iter().collect::<BTreeSet<_>>();
+    let dir = |d: &str| crawl_dir(&repo.join(d), &h).into_iter().filter(|p| p.is_file()).collect::<BTreeSet<_>>();
     assert_eq!(dir(""), want);
     assert_eq!(dir("vendor"), BTreeSet::from([repo.join("vendor/inner/doc.md")]));
     assert_eq!(dir("notes"), BTreeSet::from([repo.join("notes/todo.md")]));
@@ -261,6 +264,15 @@ fn text_file_doc() {
     let r = doc(&h.join("README"), &h).unwrap();
     assert_eq!((r.subtitle.as_str(), r.parts[0].text.as_str()), ("~", "Read me first."));
     assert!(doc(&h.join("photo.JPG"), &h).is_none() && doc(&h.join("missing.md"), &h).is_none());
+}
+
+#[test]
+fn folder_doc() {
+    let h = tmp("folder");
+    fs::create_dir_all(h.join("Pictures/Holidays 2026")).unwrap();
+    let d = doc(&h.join("Pictures/Holidays 2026"), &h).unwrap();
+    assert_eq!((d.key.as_str(), d.kind, d.title.as_str(), d.subtitle.as_str(), d.icon.as_str()), ("file:Pictures/Holidays 2026", Kind::Folder, "Holidays 2026", "~/Pictures", "folder"));
+    assert!(d.parts.is_empty() && d.names == ["Holidays", "2026"]);
 }
 
 #[test]

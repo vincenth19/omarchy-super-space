@@ -144,7 +144,7 @@ Column {
     var dot = String(item.title || "").lastIndexOf("."), audio = /^(Song|Recording) ·/.exec(item.subtitle || "")
     if (audio) return audio[1]
     if (item.kind === "file" && dot > 0) return item.title.slice(dot + 1).toUpperCase()
-    return ({ app: "App", setting: "Setting", file: "File", image: "Photo", video: "Video", audio: "Audio",
+    return ({ app: "App", setting: "Setting", file: "File", folder: "Folder", image: "Photo", video: "Video", audio: "Audio",
               clip: "Clipboard", emoji: "Emoji", history: "History", web: "Web" })[item.kind] || ""
   }
 

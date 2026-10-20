@@ -100,7 +100,7 @@ fn root_of(path: &Path, home: &Path) -> PathBuf {
     roots(home).into_iter().find(|r| path.starts_with(r)).unwrap_or_default()
 }
 
-/// Every wanted file under the roots (home itself top level only).
+/// Every wanted file and folder under the roots, the roots too (of home itself only its files).
 pub fn crawl(home: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     if opted_out(home) {
@@ -121,9 +121,9 @@ pub fn crawl(home: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// Every wanted file below `dir`, a folder that was just created or moved in, as crawl(home)
-/// finds them: nothing unless `dir` is inside a recursive root (home is top level only). One
-/// `git ls-files` for the repo around `dir`, if any, decides what is kept inside it.
+/// `dir`, a folder that was just created or moved in, and every wanted file and folder below
+/// it, as crawl(home) finds them: nothing unless `dir` is inside a recursive root (home is top
+/// level only). One `git ls-files` for the repo around `dir`, if any, decides what is kept inside it.
 pub fn crawl_dir(dir: &Path, home: &Path) -> Vec<PathBuf> {
     let (root, mut out) = (root_of(dir, home), Vec::new());
     if root != home && wanted_in(dir, home) {
@@ -138,6 +138,7 @@ fn walk(dir: &Path, keep: Option<&HashSet<PathBuf>>, out: &mut Vec<PathBuf>) {
     if opted_out(dir) {
         return;
     }
+    out.push(dir.to_path_buf());
     let listed = if dir.join(".git").exists() { git_files(dir, dir) } else { None };
     let keep = listed.as_ref().or(keep);
     for e in fs::read_dir(dir).into_iter().flatten().flatten() {
@@ -208,18 +209,18 @@ fn file_ok(path: &Path, meta: &Metadata) -> bool {
     PROSE.contains(&&*ext) || head.len() <= 110 * lines.max(1)
 }
 
-/// The Doc for a non-media file: title, icon, action and text parts with locators.
-/// Returns None for media files (ss-media handles those) and unreadable files.
+/// The Doc for a non-media file: title, icon, action and text parts with locators; for a folder
+/// the same with no parts. Returns None for media files (ss-media handles those) and unreadable files.
 pub fn doc(path: &Path, home: &Path) -> Option<Doc> {
     if ss_media::is_media(path) {
         return None;
     }
     let ext = ext(path);
-    let meta = fs::symlink_metadata(path).ok().filter(|m| m.is_file())?;
+    let meta = fs::symlink_metadata(path).ok().filter(|m| m.is_file() || m.is_dir())?;
     let title = path.file_name()?.to_string_lossy().into_owned();
     let names = words(&path.file_stem()?.to_string_lossy());
     let heading = names.join(" ");
-    let mut lines = if meta.len() > MAX_FILE { Vec::new() } else { extract::lines(path, &ext).unwrap_or_default() };
+    let mut lines = if meta.len() > MAX_FILE || meta.is_dir() { Vec::new() } else { extract::lines(path, &ext).unwrap_or_default() };
     let mut total = 0;
     lines.retain(|(_, l)| {
         total += l.len() + 1;
@@ -249,10 +250,10 @@ pub fn doc(path: &Path, home: &Path) -> Option<Doc> {
     let mtime = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos());
     Some(Doc {
         key: format!("file:{}", path.strip_prefix(home).unwrap_or(path).display()),
-        kind: Kind::File,
+        kind: if meta.is_dir() { Kind::Folder } else { Kind::File },
         title,
         subtitle,
-        icon: icon(path),
+        icon: if meta.is_dir() { "folder".into() } else { icon(path) },
         action: Action::Open { path: path.display().to_string(), locator: Locator::default() },
         // "x3": bump when extraction changes, so every file is read again.
         stamp: format!("x3-{mtime}-{}", meta.len()),

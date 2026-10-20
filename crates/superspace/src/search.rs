@@ -647,6 +647,7 @@ fn kind_word(w: &str) -> Option<Kind> {
         "photo" | "image" | "picture" | "pic" | "screenshot" => Kind::Image,
         "audio" | "song" | "music" | "track" | "memo" | "recording" | "podcast" => Kind::Audio,
         "text" | "doc" | "document" | "file" | "pdf" | "note" => Kind::File,
+        "folder" | "directory" => Kind::Folder,
         "app" | "application" => Kind::App,
         "setting" => Kind::Setting,
         "clipboard" => Kind::Clip,

@@ -13,7 +13,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 /// Stand-ins for the other crates: text files are documents, .jpg and .mp3
-/// are media whose slow Doc takes 200 ms (a song's words come from its .lrc).
+/// are media whose slow Doc takes 200 ms (a song's words come from its .lrc);
+/// folders are ss-files' own (cheap: no tools).
 pub mod ext {
     use ss_core::*;
     use std::path::{Path, PathBuf};
@@ -28,7 +29,7 @@ pub mod ext {
         p.exists() && !p.components().any(|c| c.as_os_str().to_string_lossy().starts_with('.') || c.as_os_str() == "node_modules")
     }
     pub fn crawl_dir(dir: &Path, home: &Path) -> Vec<PathBuf> {
-        let mut out = Vec::new();
+        let mut out = vec![dir.to_path_buf()];
         for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
             let p = e.path();
             if !wanted_in(&p, home) {
@@ -88,7 +89,10 @@ pub mod ext {
     pub fn default_browser() -> Option<String> {
         Some("firefox".into())
     }
-    pub fn file_doc(p: &Path, _home: &Path) -> Option<Doc> {
+    pub fn file_doc(p: &Path, home: &Path) -> Option<Doc> {
+        if p.is_dir() {
+            return ss_files::doc(p, home);
+        }
         let text = std::fs::read_to_string(p).ok()?;
         let name = p.file_name()?.to_string_lossy().into_owned();
         Some(Doc {
@@ -468,7 +472,7 @@ fn socket_sends_two_phases_and_skips_superseded_finals() {
     writeln!(s, r#"{{"op":"status","id":9}}"#).unwrap();
     writeln!(s, "not json").unwrap();
     let got = read_responses(&mut r, Instant::now() + Duration::from_secs(1));
-    assert_eq!(got[0]["value"]["items"], 5);
+    assert_eq!(got[0]["value"]["items"], 6, "the corpus and the Documents folder");
     assert!(got[1]["error"].as_str().unwrap().starts_with("bad request"));
 }
 
@@ -663,6 +667,42 @@ fn every_wanted_folder_is_watched_but_not_ignored_ones() {
     std::fs::write(docs.join("proj/src/deep/later.txt"), "badger later").unwrap();
     until("new subfolder watched", Duration::from_secs(2), || t.keys("badger").len() == 3);
     assert!(!t.keys("badger").iter().any(|k| k.contains("node_modules")));
+}
+
+#[test]
+fn folders_are_found_by_name_opened_and_follow_the_watcher() {
+    let t = start_with(0, "", None, |home| {
+        for d in ["Documents/Meetup/node_modules/pkg", "Documents/.secret/Meetup", "Documents/Videos"] {
+            std::fs::create_dir_all(home.join(d)).unwrap();
+        }
+        std::fs::write(home.join("Documents/Meetup/notes.txt"), "we agreed to hold the meetup at the library").unwrap();
+    });
+    let meetup = "file:Documents/Meetup";
+    let (rows, _) = t.search("meetup");
+    let r = &rows[0];
+    assert_eq!((r.key.as_str(), r.kind, r.title.as_str(), r.subtitle.as_str(), r.icon.as_str()), (meetup, Kind::Folder, "Meetup", "~/Documents", "folder"));
+    assert_eq!(t.keys("documents")[0], "file:Documents", "a root is a folder too");
+    assert!(t.d.store.stamp("file:Documents/Meetup/node_modules").is_none() && !t.keys("meetup").iter().any(|k| k.contains(".secret")), "excluded folders stay out");
+    // Names only: a folder named in a question ("meetup") or by a type word ("Videos") never crowds out meaning.
+    until("embedded", Duration::from_secs(5), || t.d.store.counts().0 == 0);
+    let q = "where did we agree to hold the meetup";
+    assert_eq!(t.keys(q), ["file:Documents/Meetup/notes.txt".to_string(), format!("web:{q}")]);
+    let search = |q: &str| serde_json::to_value(t.d.handle(serde_json::from_value(json!({"op": "search", "id": 1, "q": q})).unwrap())).unwrap();
+    assert!(!search("golden retriever video")["rows"].to_string().contains("Documents/Videos"));
+    let v = search("meetup folder");
+    assert_eq!((&v["filter"], &v["rows"][0]["key"]), (&json!(["folder"]), &json!(meetup)));
+    // Created, moved and deleted folders come and go.
+    std::thread::sleep(Duration::from_millis(500)); // the watches
+    let docs = t.dir.join("home/Documents");
+    std::fs::create_dir(docs.join("Tasmania")).unwrap();
+    until("new folder", Duration::from_secs(2), || t.keys("tasmania")[0] == "file:Documents/Tasmania");
+    std::fs::rename(docs.join("Tasmania"), docs.join("Meetup/Tassie")).unwrap();
+    until("moved folder", Duration::from_secs(2), || t.keys("tassie")[0] == "file:Documents/Meetup/Tassie" && t.keys("tasmania").len() == 1);
+    std::fs::remove_dir(docs.join("Meetup/Tassie")).unwrap();
+    until("deleted folder", Duration::from_secs(2), || t.keys("tassie").len() == 1);
+    // Enter opens the folder; Ctrl+Enter shows it in its parent.
+    let open = |alt: bool| t.req(json!({"op": "activate", "id": 1, "key": meetup, "q": "meetup", "alt": alt}))["argv"].clone();
+    assert_eq!((open(false), open(true)), (json!(["xdg-open", docs.join("Meetup")]), json!(["xdg-open", docs])));
 }
 
 /// Pictures whose "pixels" are words for the fake embedder.

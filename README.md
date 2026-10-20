@@ -66,6 +66,7 @@ you install later, see [For AI agents](#for-ai-agents)):
 
 - **Apps and settings**: every app, and Omarchy's menu ("wifi connect" offers the Wi-Fi actions).
 - **Files and the text inside them**: PDF pages, Word, Excel, PowerPoint, OpenDocument, EPUB, Markdown, HTML, plain text.
+- **Folders** by name ("meetup folder"): Enter opens one, Ctrl+Enter shows it in its parent.
 - **Photos** by what is in them, in any language ("anjing" finds the dog), plus text in screenshots.
 - **Videos** down to the moment, shown as thumbnails on a timeline.
 - **Spoken words and song lyrics** in recordings, videos and music.
