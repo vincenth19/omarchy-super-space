@@ -20,6 +20,9 @@ Column {
   property var item: ({})
   property string iconSource: ""
   property bool selected: false
+  // ↑/↓ are in the rows: the selected row is solid. While typing it is soft: what Enter opens.
+  property bool focused: true
+  readonly property bool solid: selected && focused
   property int hit: 0            // the picked hit: an index into item.hits
   property bool expanded: false  // Tab: every hit on a line of its own
   property bool notice: false    // nothing local matched: say so above this (web) row
@@ -34,7 +37,7 @@ Column {
   // matched by their whole lyrics have no sections and keep their snippet.
   readonly property bool timed: item.duration > 0 && hits.length > 0
   readonly property int iconSize: item.kind === "image" ? Style.space(56) : Style.space(28)
-  readonly property color ink: selected ? Commons.Color.menu.selectedText : Commons.Color.menu.text
+  readonly property color ink: solid ? Commons.Color.menu.selectedText : Commons.Color.menu.text
   // Secondary text is the theme's text colour dimmed, as in Omarchy's menu.
   readonly property real dim: 0.52
   readonly property string sans: Qt.application.font.family
@@ -163,8 +166,8 @@ Column {
     width: root.width
     height: Math.max(body.implicitHeight, glyph.height, side.implicitHeight) + Style.spacing.lg * 2
     radius: Style.cornerRadius
-    color: root.selected ? Commons.Color.menu.selectedBackground : "transparent"
-    borderSpec: root.selected ? Border.surfaceSpec("menu", "selected-border", Commons.Color.menu.selectedBorder, 0) : Border.none()
+    color: root.solid ? Commons.Color.menu.selectedBackground : root.selected ? Style.normalFillFor(Commons.Color.menu.text, Commons.Color.accent) : "transparent"
+    borderSpec: root.solid ? Border.surfaceSpec("menu", "selected-border", Commons.Color.menu.selectedBorder, 0) : Border.none()
 
     MouseArea {  // first, so the emoji, chips and timeline have their own above it
       anchors.fill: parent

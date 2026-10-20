@@ -292,7 +292,7 @@ Item {
 
   // True when the key was ours. The text field does the rest itself: ←/→, Shift to select,
   // Ctrl+←/→ by words, Home/End, Ctrl+A, Ctrl+Backspace, Ctrl+X/C/V. Alt and Super (Cmd in
-  // the VM) add the macOS meanings where Hyprland's own Super bindings let them through.
+  // the VM) add the macOS meanings; the panel's ShortcutInhibitor keeps Super from Hyprland.
   function press(key, mods) {
     var ctrl = (mods & Qt.ControlModifier) !== 0, alt = (mods & Qt.AltModifier) !== 0
     var meta = (mods & Qt.MetaModifier) !== 0, shift = (mods & Qt.ShiftModifier) !== 0
@@ -311,7 +311,7 @@ Item {
     if ([Qt.Key_Home, Qt.Key_End, Qt.Key_Backspace, Qt.Key_Delete].indexOf(key) >= 0 || ((ctrl || meta) && key === Qt.Key_A)) mode = "text"
     if (askBind && !field.text && (enter || key === Qt.Key_Escape)) { bind.running = enter; askBind = false }
     else if (mode === "sections" && (key === Qt.Key_Escape || back)) mode = "text"
-    else if (key === Qt.Key_Escape) close()
+    else if (key === Qt.Key_Escape || (meta && key === Qt.Key_Space)) close()
     else if (key === Qt.Key_Down || (ctrl && key === Qt.Key_N)) settle(function() { move(1) }, "rows")
     else if (key === Qt.Key_Up || (ctrl && key === Qt.Key_P)) settle(function() { move(-1) }, "rows")
     else if (enter) settle(function() { activate(sel, ctrl) })
@@ -387,6 +387,9 @@ Item {
     WlrLayershell.namespace: "omarchy-menu"
     WlrLayershell.layer: WlrLayer.Overlay
     WlrLayershell.keyboardFocus: WlrKeyboardFocus.OnDemand
+    // While open, Super (Cmd in the VM) reaches the box instead of Hyprland's bindings: Super+Backspace
+    // clears, Super+←/→ go to the ends, Super+Space closes.
+    ShortcutInhibitor { window: panel; enabled: root.opened }
 
     Rectangle { anchors.fill: parent; color: Commons.Color.menu.scrim }
     MouseArea { anchors.fill: parent; onClicked: root.close() }
@@ -433,7 +436,7 @@ Item {
             id: caret
             width: Math.max(1, Style.space(2))
             color: Commons.Color.menu.text
-            visible: field.activeFocus && !field.selectedText
+            visible: field.activeFocus && !field.selectedText && root.mode === "text"  // gone while ↑/↓ are in the rows
             Timer {
               id: blink
               interval: Qt.styleHints.cursorFlashTime / 2
@@ -571,6 +574,7 @@ Item {
             // A video's icon from the daemon is its first frame, unreadable at icon size: it wears mpv's, as audio does.
             iconSource: root.iconSource(modelData.kind === "video" && String(modelData.icon).charAt(0) === "/" ? "mpv" : modelData.icon)
             selected: index + root.offset === root.sel
+            focused: root.mode !== "text"
             hit: selected ? root.hit : 0
             expanded: selected && root.mode === "sections"
             notice: root.empty && modelData.kind === "web"

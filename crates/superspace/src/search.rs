@@ -673,7 +673,8 @@ pub fn type_words(q: &str) -> Option<(String, Vec<Kind>, bool, bool)> {
     let named = end == 0 && w.first().is_some_and(|t| t.ends_with('s') && matches!(kind_word(t), Some(Kind::App | Kind::Setting)));
     let end = if named { w.len() } else { end };
     let start = (0..end).take_while(typeword).count();
-    let plural = w[..start].iter().take_while(|t| kind_word(t).is_none() || t.ends_with('s')).count();
+    // "emoji" and "clipboard" are their own plurals ("emoji money").
+    let plural = w[..start].iter().take_while(|t| kind_word(t).is_none() || t.ends_with('s') || matches!(**t, "emoji" | "clipboard")).count();
     let start = if named { 1 } else if w.get(start).is_some_and(|t| ["of", "about", "with", "from", "on", "where", "that"].contains(t)) { start } else { plural };
     let typed = || w[..start].iter().chain(&w[end..]);
     let mut kinds = Vec::new();

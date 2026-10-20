@@ -989,15 +989,15 @@ fn leading_plural_type_words_scope_the_search_and_singular_ones_stay_whole() {
     let led = |q: &str, k: &[Kind], pdf: bool| Some((q.to_string(), k.to_vec(), pdf, true));
     for (q, k) in [("apps firefox", Kind::App), ("settings wifi", Kind::Setting), ("files lease", Kind::File), ("docs lease", Kind::File),
         ("photos beach", Kind::Image), ("videos dog", Kind::Video), ("songs breakup", Kind::Audio), ("voice memos groceries", Kind::Audio),
-        ("emojis happy", Kind::Emoji), ("websites github", Kind::History), ("settings audio", Kind::Setting), ("apps files", Kind::App)] {
+        ("emojis happy", Kind::Emoji), ("emoji money", Kind::Emoji), ("clipboard lease", Kind::Clip), ("websites github", Kind::History),
+        ("settings audio", Kind::Setting), ("apps files", Kind::App)] {
         assert_eq!(search::type_words(q), led(q.rsplit(' ').next().unwrap(), &[k], false), "{q}");
     }
     assert_eq!(search::type_words("pdfs only lease"), led("lease", &[Kind::File], true));
     assert_eq!(search::type_words("apps and settings wifi"), led("wifi", &[Kind::App, Kind::Setting], false));
     assert_eq!(search::type_words("songs about a breakup"), led("about a breakup", &[Kind::Audio], false));
     assert_eq!(search::type_words("apps text editor"), led("text editor", &[Kind::App], false), "up to the singular word");
-    for q in ["photo editor", "video call", "image viewer", "app idea", "history essay", "music festival tickets", "audio mixer", "footage review",
-        "emoji menu", "clipboard manager"] {
+    for q in ["photo editor", "video call", "image viewer", "app idea", "history essay", "music festival tickets", "audio mixer", "footage review"] {
         assert_eq!(search::type_words(q), None, "{q}: singular, or nothing else left");
     }
 }
