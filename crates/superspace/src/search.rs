@@ -669,6 +669,8 @@ pub fn type_words(q: &str) -> Option<(String, Vec<Kind>, bool)> {
         kind_word(w[*i]).is_some() || ["and", "or", ","].contains(&w[*i]) || w[*i] == "voice" && w.get(i + 1).is_some_and(|t| t.trim_end_matches('s') == "memo")
     };
     let end = w.len() - (0..w.len()).rev().take_while(typeword).count();
+    // "music folder": all type words, so the ones before "folder" name it.
+    let end = if end == 0 && w.last().is_some_and(|t| kind_word(t) == Some(Kind::Folder)) { w.len() - 1 } else { end };
     let start = (0..end).take_while(typeword).count();
     let start = if w.get(start).is_some_and(|t| ["of", "about", "with", "from", "on", "where", "that"].contains(t)) { start } else { 0 };
     let typed = || w[..start].iter().chain(&w[end..]);
@@ -730,7 +732,8 @@ fn asks_history(qn: &str) -> bool {
 
 /// The row for `key` as `q` with its type-word filter `f` ranks it (for activation); with `learn`,
 /// after learning from the pick: the picked row should beat every row shown above it (only rows
-/// the filter keeps were shown).
+/// the filter keeps were shown). Never from a folder: lacking a kind weight and meaning, its picks
+/// would only lower those for every query (the pick still counts for its prefix).
 pub fn pick(d: &Daemon, q: &str, f: Option<&Filter>, key: &str, qv: Option<&QVecs>, learn: bool) -> Result<Row> {
     let (q, kinds, pdf) = f.map_or((q, None, false), |f| (f.q.as_str(), Some(f.kinds.as_slice()), f.pdf));
     let mem = d.store.mem.read().unwrap();
@@ -739,7 +742,7 @@ pub fn pick(d: &Daemon, q: &str, f: Option<&Filter>, key: &str, qv: Option<&QVec
     ranked.retain(|x| x.0 == id || x.1.kept && wanted(&mem.items[&x.0], kinds, pdf));
     order(&mem, &mut ranked);
     let pos = ranked.iter().position(|x| x.0 == id).unwrap();
-    if learn && !norm(q).is_empty() && ranked[pos].1.kept && pos > 0 {
+    if learn && mem.items[&id].kind != Kind::Folder && !norm(q).is_empty() && ranked[pos].1.kept && pos > 0 {
         let mut w = d.weights.write().unwrap();
         let fp = ranked[pos].1.f;
         for (_, s) in ranked[..pos].iter().filter(|x| !x.1.pinned) {

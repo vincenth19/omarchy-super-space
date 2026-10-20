@@ -126,7 +126,7 @@ fn pref_change(a: &[&str]) -> Result<Value> {
 fn tools() -> Value {
     let s = |props: Value, req: &[&str]| json!({"type": "object", "properties": props, "required": req});
     json!([
-        {"name": "search", "description": "Search the user's computer by name, keyword and meaning: files (and the text inside PDFs and Office files, with pages), photos, video moments, spoken words, apps, settings, clipboard, browser history. Use this instead of ls/find/grep for the user's files. Results are ranked; empty=true means nothing local matched.",
+        {"name": "search", "description": "Search the user's computer by name, keyword and meaning: files (and the text inside PDFs and Office files, with pages), folders by name, photos, video moments, spoken words, apps, settings, clipboard, browser history. Use this instead of ls/find/grep for the user's files. Results are ranked; empty=true means nothing local matched.",
          "inputSchema": s(json!({"q": {"type": "string"}, "kinds": {"type": "array", "items": {"type": "string", "enum": ["app","setting","file","folder","image","video","audio","clip","emoji","history","web"]}}, "limit": {"type": "integer", "default": 10}}), &["q"])},
         {"name": "read", "description": "Read an indexed item's text by key (from search), all parts or one part (0-based).",
          "inputSchema": s(json!({"key": {"type": "string"}, "part": {"type": "integer"}}), &["key"])},

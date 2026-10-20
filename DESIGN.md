@@ -98,7 +98,8 @@ Type words (decided 19 Oct): kind words at the end of the query (or at the
 start before of/about/with/…), joined by and/or/,/&/only, filter by kind —
 video(s), photo(s)/image(s)/picture(s), audio/song(s)/music/(voice) memo(s),
 text/doc(s)/document(s)/pdf(s)/note(s), app(s), setting(s), clipboard, emoji,
-history/website(s), folder(s)/directory. The daemon strips them, filters, and reports
+history/website(s), folder(s)/directory ("music folder": the words before it
+name the folder). The daemon strips them, filters, and reports
 `Response.filter` for the UI's chip; a client's own `kinds` wins. A query that
 is itself the name of something the filter would hide ("photo viewer", "text
 editor") is not filtered, and a filter that would leave nothing while an app or
@@ -148,7 +149,8 @@ cosine, cosine margin over the next row and over the item's hub score, kind,
 modified-recency, frecency, picks for the typed prefix, preference boosts,
 similarity to `prefer` sentences. Starting weights are fitted on the bench;
 every activation then updates the user's weights online (pairwise: the picked
-row beats the rows shown above it), with picks decaying over a few weeks and a
+row beats the rows shown above it; not from a folder, which has no kind weight
+or meaning to weigh), with picks decaying over a few weeks and a
 short freshness boost for new items so habits cannot bury them. Weights live
 in `~/.local/state/superspace/weights.json`; `explain` shows each feature's
 contribution. A cross-encoder (Qwen3-Reranker-0.6B, top 5, after typing
@@ -326,8 +328,9 @@ the query's final phase, so they never act on a row left from an earlier
 query (19 Oct); with no daemon connected they act at once.
 
 Icons: apps use their own icon; files use the icon of the app that opens
-their mime type on this machine (`xdg-mime query default`); the web row uses
-the default browser's icon (`xdg-settings get default-web-browser`).
+their mime type on this machine (`xdg-mime query default`), folders the
+theme's `folder` icon; the web row uses the default browser's icon
+(`xdg-settings get default-web-browser`).
 
 Theme-agnostic: every colour, font, radius and transparency comes from
 Omarchy's shell theme (the same tokens Omarchy's own launcher and menus use,

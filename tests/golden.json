@@ -190,6 +190,7 @@
 {"id": "none-id", "q": "laporan keuangan perusahaan tambang", "tags": ["no-results", "indonesian"], "empty": true},
 
 {"id": "folder-name", "q": "recipes", "tags": ["folder", "name", "after-0.1.2"], "want": {"key": "file:Documents/Recipes", "kind": "folder"}},
-{"id": "folder-type-word", "q": "meetup folder", "tags": ["folder", "filter", "after-0.1.2"], "want": {"key": "file:Documents/Meetup", "kind": "folder"}, "filter": true, "kinds": ["folder"]}
+{"id": "folder-type-word", "q": "meetup folder", "tags": ["folder", "filter", "after-0.1.2"], "want": {"key": "file:Documents/Meetup", "kind": "folder"}, "filter": true, "kinds": ["folder"]},
+{"id": "folder-type-words", "q": "screenshots folder", "tags": ["folder", "filter", "after-0.1.2"], "want": {"key": "file:Pictures/Screenshots", "kind": "folder"}, "filter": true, "kinds": ["folder"]}
 ]
 }

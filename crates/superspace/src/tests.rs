@@ -689,8 +689,10 @@ fn folders_are_found_by_name_opened_and_follow_the_watcher() {
     assert_eq!(t.keys(q), ["file:Documents/Meetup/notes.txt".to_string(), format!("web:{q}")]);
     let search = |q: &str| serde_json::to_value(t.d.handle(serde_json::from_value(json!({"op": "search", "id": 1, "q": q})).unwrap())).unwrap();
     assert!(!search("golden retriever video")["rows"].to_string().contains("Documents/Videos"));
-    let v = search("meetup folder");
-    assert_eq!((&v["filter"], &v["rows"][0]["key"]), (&json!(["folder"]), &json!(meetup)));
+    for (q, key) in [("meetup folder", meetup), ("documents folder", "file:Documents")] {
+        let v = search(q);
+        assert_eq!((&v["filter"], &v["rows"][0]["key"]), (&json!(["folder"]), &json!(key)), "{q}");
+    }
     // Created, moved and deleted folders come and go.
     std::thread::sleep(Duration::from_millis(500)); // the watches
     let docs = t.dir.join("home/Documents");
@@ -700,9 +702,14 @@ fn folders_are_found_by_name_opened_and_follow_the_watcher() {
     until("moved folder", Duration::from_secs(2), || t.keys("tassie")[0] == "file:Documents/Meetup/Tassie" && t.keys("tasmania").len() == 1);
     std::fs::remove_dir(docs.join("Meetup/Tassie")).unwrap();
     until("deleted folder", Duration::from_secs(2), || t.keys("tassie").len() == 1);
-    // Enter opens the folder; Ctrl+Enter shows it in its parent.
+    // Enter opens the folder; Ctrl+Enter shows it in its parent. Picked under a file, it leaves the weights alone.
+    std::fs::write(docs.join("meetup.txt"), "meetup plans").unwrap();
+    until("a file named like it", Duration::from_secs(2), || t.keys("meetup")[0] == "file:Documents/meetup.txt");
+    let w0 = *t.d.weights.read().unwrap();
     let open = |alt: bool| t.req(json!({"op": "activate", "id": 1, "key": meetup, "q": "meetup", "alt": alt}))["argv"].clone();
     assert_eq!((open(false), open(true)), (json!(["xdg-open", docs.join("Meetup")]), json!(["xdg-open", docs])));
+    until("the picks", Duration::from_secs(2), || t.d.picks.read().unwrap().len() == 2);
+    assert_eq!(*t.d.weights.read().unwrap(), w0);
 }
 
 /// Pictures whose "pixels" are words for the fake embedder.
@@ -968,8 +975,9 @@ fn type_words_filter_by_kind_unless_they_name_what_the_filter_hides() {
     assert_eq!(words("invoice memo pdf"), Some(("invoice".into(), vec![Kind::Audio, Kind::File], true)), "voice memo is two words");
     assert_eq!(words("lease pdfs or docs"), s("lease", &[Kind::File]), "docs are any file");
     assert_eq!(words("awkward emoji"), s("awkward", &[Kind::Emoji]));
+    assert_eq!(words("voice memos folder"), s("voice memos", &[Kind::Folder]), "type words name a folder");
     for q in ["text editor", "photo viewer", "music player", "app idea for watering plants", "website redesign invoice", "screenshot",
-        "photos and videos", "dog clip", "lease page", "rock and roll"] {
+        "photos and videos", "dog clip", "lease page", "rock and roll", "folder"] {
         assert_eq!(words(q), None, "{q}");
     }
     let t = start(0, "[[boost]]\nkey = \"app:puppy\"\nby = 1.0\n");
