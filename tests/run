@@ -4,7 +4,7 @@
   tests/run                       everything, against the running daemon
   tests/run --only golden,live    some sections: golden budgets prefs parity live ui theme
   tests/run --tags demo           only golden cases with one of these tags
-  tests/run --skip-tags after-0.1.1   not those (cases for a daemon newer than v0.1.1)
+  tests/run --skip-tags after-0.1.1,after-0.1.2   not those (cases for a daemon newer than v0.1.1)
   tests/run --demo                the demo script's queries in order, one pass/fail table (before going on stage)
   tests/run --self-test           prove the bench catches faults, using tests/fake_daemon.py
 
@@ -989,7 +989,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--only", help="comma list of sections: " + " ".join(SECTIONS))
     ap.add_argument("--tags", help="only golden cases with one of these tags")
-    ap.add_argument("--skip-tags", help="skip golden cases with one of these tags (after-0.1.1 against a v0.1.1 daemon)")
+    ap.add_argument("--skip-tags", help="skip golden cases with one of these tags (after-0.1.1,after-0.1.2 against a v0.1.1 daemon)")
     ap.add_argument("--sock")
     ap.add_argument("--home", help="the daemon's home, when its status does not report it")
     ap.add_argument("--themes", help="opt-in: switch the live theme to each of these and screenshot the UI")

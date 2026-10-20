@@ -657,12 +657,10 @@ fn kind_word(w: &str) -> Option<Kind> {
 }
 
 /// Type words at the end of the query ("golden retriever video", "breakup songs", "… audio and
-/// text"), or at its start when plural or before "of", "about", … ("apps firefox", "settings wifi",
-/// "photos of the beach"): a singular one is part of a name ("text editor", "app idea" and "video
-/// call" stay whole), and of the words nobody pluralizes only "emoji" and "clipboard" lead
-/// ("music player", "history essay" and "audio mixer" stay whole); and "only" anywhere: the rest of
-/// the query, the kinds asked for, whether the files asked for are PDFs and whether type words
-/// lead. None when nothing else is left.
+/// text"), or leading when plural ("apps firefox", "settings audio") or before "of", "about", …
+/// ("photos of the beach"), and "only" anywhere: the rest of the query, the kinds asked for, whether
+/// the files asked for are PDFs and whether type words lead. A singular one leads a name ("text
+/// editor", "history essay"). None when nothing else is left.
 pub fn type_words(q: &str) -> Option<(String, Vec<Kind>, bool, bool)> {
     let lower = q.to_lowercase().replace([',', '&'], " , ");
     let w: Vec<&str> = lower.split_whitespace().filter(|t| *t != "only").collect();
@@ -671,9 +669,12 @@ pub fn type_words(q: &str) -> Option<(String, Vec<Kind>, bool, bool)> {
         kind_word(w[*i]).is_some() || ["and", "or", ","].contains(&w[*i]) || w[*i] == "voice" && w.get(i + 1).is_some_and(|t| t.trim_end_matches('s') == "memo")
     };
     let end = w.len() - (0..w.len()).rev().take_while(typeword).count();
+    // Apps and settings are called by kind words too ("settings audio", "apps files").
+    let named = end == 0 && w.first().is_some_and(|t| t.ends_with('s') && matches!(kind_word(t), Some(Kind::App | Kind::Setting)));
+    let end = if named { w.len() } else { end };
     let start = (0..end).take_while(typeword).count();
-    let plural = w[..start].iter().all(|t| kind_word(t).is_none() || t.ends_with('s') || ["emoji", "clipboard"].contains(t));
-    let start = if plural || w.get(start).is_some_and(|t| ["of", "about", "with", "from", "on", "where", "that"].contains(t)) { start } else { 0 };
+    let plural = w[..start].iter().take_while(|t| kind_word(t).is_none() || t.ends_with('s')).count();
+    let start = if named { 1 } else if w.get(start).is_some_and(|t| ["of", "about", "with", "from", "on", "where", "that"].contains(t)) { start } else { plural };
     let typed = || w[..start].iter().chain(&w[end..]);
     let mut kinds = Vec::new();
     for k in typed().filter_map(|t| kind_word(t)) {
@@ -701,22 +702,27 @@ fn matched(d: &Daemon, mem: &Mem, q: &str, only: impl Fn(&Item) -> bool) -> bool
         || d.store.read(|c| Ok(keywords(c, q, false))).unwrap_or_default().iter().any(|(p, _)| mem.parts.get(p).is_some_and(|p| only(&mem.items[&p.item])))
 }
 
-/// `type_words` as a filter, unless something the filter would hide is called all of the query
-/// ("musical notes" is an emoji), or what is left names an app or setting it would hide and so does
-/// the whole query ("take a screenshot" is the Screenshot setting, "bluetooth audio" the Hardware
-/// setting's words) or nothing the filter keeps matches ("spotify music", "docker image"). Fuzzy
-/// names are matched against apps and settings, and only then against what the filter keeps: about
-/// 1 ms on a Pi. Apps and settings go by a trailing type word ("display settings", "Web App"), so
-/// names and keywords match all of the query for them, unless type words lead ("settings wifi" is
-/// named "wifi"). Pictures have no "photo" or "video" in their meaning, so for them the type words are
-/// not embedded either; songs and documents read like what they are ("breakup songs" finds the
-/// breakup songs, "breakup" a song titled "After You've Gone").
+/// `type_words` as a filter, unless the query's words start a name of something the filter would
+/// hide ("musical notes" is an emoji, "movies to wat" movies-to-watch.md), or what is left names an
+/// app or setting it would hide and so does the whole query ("take a screenshot" is the Screenshot
+/// setting, "bluetooth audio" the Hardware setting's words) or nothing the filter keeps matches
+/// ("spotify music", "docker image"). Fuzzy names are matched against apps and settings, and only
+/// then against what the filter keeps: about 1 ms on a Pi. Apps and settings go by a trailing type
+/// word ("display settings", "Web App"), so names and keywords match all of the query for them,
+/// unless type words lead ("settings wifi" is named "wifi"). Pictures have no "photo" or "video" in
+/// their meaning, so for them the type words are not embedded either; songs and documents read like
+/// what they are ("breakup songs" finds the breakup songs, "breakup" a song titled "After You've
+/// Gone").
 pub fn filter(d: &Daemon, q: &str) -> Option<Filter> {
     let (rest, kinds, pdf, lead) = type_words(q)?;
     let mem = d.store.mem.read().unwrap();
     let wants = |it: &Item| wanted(it, Some(&kinds), pdf);
     let command = |it: &Item| matches!(it.kind, Kind::App | Kind::Setting) && !wants(it);
-    let called = |it: &Item| std::iter::once(&it.title).chain(&it.names).any(|n| n.eq_ignore_ascii_case(q.trim()));
+    let qw = q.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty());
+    let called = |it: &Item| std::iter::once(&it.title).chain(&it.names).any(|n| {
+        let mut n = n.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty());
+        qw.clone().all(|w| n.next().and_then(|t| t.get(..w.len())).is_some_and(|t| t.eq_ignore_ascii_case(w)))
+    });
     let named = if !lead && kinds.iter().all(|k| matches!(k, Kind::App | Kind::Setting)) { q.to_string() } else { rest.clone() };
     if mem.items.values().any(|it| !wants(it) && called(it))
         || matched(d, &mem, &rest, command) && (matched(d, &mem, q, command) || !matched(d, &mem, &named, wants))

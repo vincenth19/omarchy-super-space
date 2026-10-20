@@ -940,8 +940,12 @@ fn type_words_filter_by_kind_unless_they_name_what_the_filter_hides() {
         doc("setting:spotify", Kind::Setting, "Spotify", "launch the player", &[]),
         doc("setting:window-pop", Kind::Setting, "Pop a window out onto a display", "float it", &[]),
         doc("setting:monitors", Kind::Setting, "Monitors", "resolution and scale", &["display settings"]),
+        doc("setting:network", Kind::Setting, "Network", "wireless connections", &["wifi"]),
+        doc("setting:audio", Kind::Setting, "Audio", "volume and outputs", &[]),
+        doc("app:settings", Kind::App, "Settings Manager", "configure the desktop", &[]),
         doc("emoji:🎶", Kind::Emoji, "Musical notes", "music", &[]),
         doc("file:Documents/lease-notes.md", Kind::File, "lease-notes.md", "questions about the lease", &[]),
+        doc("file:Documents/movies-to-watch.md", Kind::File, "movies-to-watch.md", "Dune, Arrival", &[]),
     ]);
     let search = |q: &str, kinds: Value| {
         let v = serde_json::to_value(t.d.handle(serde_json::from_value(json!({"op": "search", "id": 1, "q": q, "kinds": kinds})).unwrap())).unwrap();
@@ -961,6 +965,13 @@ fn type_words_filter_by_kind_unless_they_name_what_the_filter_hides() {
     let (filter, rows) = search("display settings", Value::Null);
     assert_eq!((filter, rows[0].as_str()), (json!(["setting"]), "setting:monitors"), "a setting's name holds its type word");
     assert_eq!(search("lease pdf", Value::Null), (json!(["file"]), keys(&["file:Documents/lease.pdf", "web:lease pdf"])), "PDFs only");
+    assert_eq!(search("apps firefox", Value::Null), (json!(["app"]), keys(&["app:firefox", "web:apps firefox"])));
+    assert_eq!(search("settings wifi", Value::Null), (json!(["setting"]), keys(&["setting:network", "web:settings wifi"])), "named wifi");
+    assert_eq!(search("settings audio", Value::Null), (json!(["setting"]), keys(&["setting:audio", "setting:hardware", "web:settings audio"])), "named audio");
+    for (q, key) in [("settings manager", "app:settings"), ("settings manag", "app:settings"), ("movies to watch", "file:Documents/movies-to-watch.md")] {
+        let (filter, rows) = search(q, Value::Null);
+        assert_eq!((filter, rows[0].as_str()), (Value::Null, key), "{q}: the start of a name the filter would hide");
+    }
     // Learning counts only the rows the filter showed: the boosted Puppy app ranks above puppy.txt, but only unfiltered.
     let w0 = *t.d.weights.read().unwrap();
     let picked = |n: usize| until("the pick is learnt", Duration::from_secs(2), || t.d.picks.read().unwrap().len() == n);
@@ -978,36 +989,16 @@ fn leading_plural_type_words_scope_the_search_and_singular_ones_stay_whole() {
     let led = |q: &str, k: &[Kind], pdf: bool| Some((q.to_string(), k.to_vec(), pdf, true));
     for (q, k) in [("apps firefox", Kind::App), ("settings wifi", Kind::Setting), ("files lease", Kind::File), ("docs lease", Kind::File),
         ("photos beach", Kind::Image), ("videos dog", Kind::Video), ("songs breakup", Kind::Audio), ("voice memos groceries", Kind::Audio),
-        ("emoji happy", Kind::Emoji), ("clipboard lease", Kind::Clip), ("websites github", Kind::History)] {
+        ("emojis happy", Kind::Emoji), ("websites github", Kind::History), ("settings audio", Kind::Setting), ("apps files", Kind::App)] {
         assert_eq!(search::type_words(q), led(q.rsplit(' ').next().unwrap(), &[k], false), "{q}");
     }
     assert_eq!(search::type_words("pdfs only lease"), led("lease", &[Kind::File], true));
     assert_eq!(search::type_words("apps and settings wifi"), led("wifi", &[Kind::App, Kind::Setting], false));
     assert_eq!(search::type_words("songs about a breakup"), led("about a breakup", &[Kind::Audio], false));
-    for q in ["photo editor", "video call", "image viewer", "app idea", "history essay", "music festival tickets", "audio mixer", "footage review"] {
-        assert_eq!(search::type_words(q), None, "{q}: singular, or a word nobody pluralizes");
-    }
-    let t = start(0, "");
-    corpus(&t);
-    t.put(vec![
-        doc("setting:network", Kind::Setting, "Network", "wireless connections", &["wifi"]),
-        doc("setting:monitors", Kind::Setting, "Monitors", "resolution and scale", &["display settings"]),
-        doc("app:settings", Kind::App, "Settings Manager", "configure the desktop", &[]),
-        doc("file:Documents/lease-notes.md", Kind::File, "lease-notes.md", "questions about the lease", &[]),
-    ]);
-    let search = |q: &str| {
-        let v = serde_json::to_value(t.d.handle(serde_json::from_value(json!({"op": "search", "id": 1, "q": q})).unwrap())).unwrap();
-        (v["filter"].clone(), v["rows"].as_array().unwrap().iter().map(|r| r["key"].as_str().unwrap().to_string()).collect::<Vec<_>>())
-    };
-    let keys = |k: &[&str]| k.iter().map(|k| k.to_string()).collect::<Vec<_>>();
-    assert_eq!(search("apps firefox"), (json!(["app"]), keys(&["app:firefox", "web:apps firefox"])));
-    assert_eq!(search("settings wifi"), (json!(["setting"]), keys(&["setting:network", "web:settings wifi"])), "named wifi, not settings wifi");
-    assert_eq!(search("pdfs lease"), (json!(["file"]), keys(&["file:Documents/lease.pdf", "web:pdfs lease"])), "PDFs only");
-    let named = search::filter(&t.d, "display settings").map(|f| f.q);
-    assert_eq!(named.as_deref(), Some("display settings"), "a trailing type word is part of names");
-    for q in ["settings manager", "settings manag"] {
-        let (filter, rows) = search(q);
-        assert_eq!((filter, rows[0].as_str()), (Value::Null, "app:settings"), "{q}: an app the filter would hide is called that");
+    assert_eq!(search::type_words("apps text editor"), led("text editor", &[Kind::App], false), "up to the singular word");
+    for q in ["photo editor", "video call", "image viewer", "app idea", "history essay", "music festival tickets", "audio mixer", "footage review",
+        "emoji menu", "clipboard manager"] {
+        assert_eq!(search::type_words(q), None, "{q}: singular, or nothing else left");
     }
 }
 

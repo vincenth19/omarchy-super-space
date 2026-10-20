@@ -95,16 +95,15 @@ superseded on the same connection. `activate` runs the action in the daemon
 (one code path for UI, CLI and agents) and records the pick.
 
 Type words (decided 19 Oct, leading plurals 20 Oct): kind words at the end of
-the query, or at its start when plural ("apps firefox", "settings wifi"; also
-emoji and clipboard) or before of/about/with/…, joined by and/or/,/&/only,
-filter by kind — video(s), photo(s)/image(s)/picture(s),
-audio/song(s)/music/(voice) memo(s), text/doc(s)/document(s)/pdf(s)/note(s),
-app(s), setting(s), clipboard, emoji, history/website(s). A singular one at
-the start is part of a name ("text editor", "video call"), and so are music,
-audio, footage and history, which nobody pluralizes ("music player", "history
-essay"). The daemon strips them, filters, and reports `Response.filter` for
-the UI's chip; a client's own `kinds` wins. A query that is itself the name of
-something the filter would hide ("take a screenshot", "Settings Manager") is
+the query, or at its start when plural ("apps firefox", "settings audio") or
+before of/about/with/…, joined by and/or/,/&/only, filter by kind — video(s),
+photo(s)/image(s)/picture(s), audio/song(s)/music/(voice) memo(s),
+text/doc(s)/document(s)/pdf(s)/note(s), app(s), setting(s), clipboard, emoji,
+history/website(s). A singular one at the start is part of a name ("text
+editor", "emoji picker", "history essay"). The daemon strips them, filters, and
+reports `Response.filter` for the UI's chip; a client's own `kinds` wins. A
+query whose words start a name of something the filter would hide ("take a
+screenshot", "Settings Manager", "movies to watch" for movies-to-watch.md) is
 not filtered, and a filter that would leave nothing while an app or setting
 matches the words ("spotify music") falls back to no filter.
 
