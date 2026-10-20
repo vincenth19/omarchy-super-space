@@ -526,7 +526,7 @@ dependencies = [
 
 [[package]]
 name = "ss-answers"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -537,7 +537,7 @@ dependencies = [
 
 [[package]]
 name = "ss-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "serde",
@@ -546,7 +546,7 @@ dependencies = [
 
 [[package]]
 name = "ss-files"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "chrono",
  "flate2",
@@ -558,7 +558,7 @@ dependencies = [
 
 [[package]]
 name = "ss-media"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "serde",
@@ -568,7 +568,7 @@ dependencies = [
 
 [[package]]
 name = "ss-sources"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "serde",
@@ -579,7 +579,7 @@ dependencies = [
 
 [[package]]
 name = "superspace"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "notify",
