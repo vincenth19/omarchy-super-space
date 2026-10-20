@@ -57,10 +57,11 @@ pub fn stamp(path: &Path, home: &Path) -> Option<String> {
         Some(format!("{}.{}", m.modified().ok()?.duration_since(UNIX_EPOCH).ok()?.as_nanos(), m.len()))
     };
     let mut s = format!("m1-{}", mtime(path)?);
-    if kind == Kind::Audio
-        && let Some(l) = mtime(&path.with_extension("lrc"))
-    {
-        s += &format!("-lrc{l}");
+    if kind == Kind::Audio {
+        s += "-a2"; // a2: songs told from recordings
+        if let Some(l) = mtime(&path.with_extension("lrc")) {
+            s += &format!("-lrc{l}");
+        }
     }
     if kind == Kind::Video {
         s += &format!("-v3-g{}-{}", frame_gap(0.0), frame_gap(f32::INFINITY)); // v2: near-black frames skipped; v3: gap by length
@@ -116,26 +117,88 @@ pub fn lrc_owner(lrc: &Path) -> Option<PathBuf> {
 }
 
 fn finish(path: &Path, home: &Path, kind: Kind, stamp: String, saved: Saved) -> Option<Doc> {
-    let mut subtitle = match path.parent().map(|p| (p, p.strip_prefix(home))) {
-        Some((_, Ok(d))) if d.as_os_str().is_empty() => "~".to_owned(),
-        Some((_, Ok(d))) => format!("~/{}", d.display()),
-        Some((p, Err(_))) => p.display().to_string(),
-        None => String::new(),
+    let name = path.file_name()?.to_string_lossy().into_owned();
+    let (title, subtitle) = if kind == Kind::Audio {
+        audio_text(path, home, &name, &saved)
+    } else {
+        let folder = match path.parent().map(|p| (p, p.strip_prefix(home))) {
+            Some((_, Ok(d))) if d.as_os_str().is_empty() => "~".to_owned(),
+            Some((_, Ok(d))) => format!("~/{}", d.display()),
+            Some((p, Err(_))) => p.display().to_string(),
+            None => String::new(),
+        };
+        (name.clone(), [Some(folder), saved.artist].into_iter().flatten().collect::<Vec<_>>().join(" · "))
     };
-    if let Some(artist) = &saved.artist {
-        subtitle += &format!(" · {artist}");
+    let mut names = saved.names;
+    if title != name {
+        names.push(name); // the exact file name still hits
     }
     Some(Doc {
         key: format!("file:{}", path.strip_prefix(home).unwrap_or(path).display()),
         kind,
-        title: path.file_name()?.to_string_lossy().into_owned(),
+        title,
         subtitle,
         icon: saved.icon,
-        action: Action::Open { path: path.display().to_string(), locator: Locator::default() },
+        // The whole file: from the start to its end (audio and video), which rows send as `duration`.
+        action: Action::Open { path: path.display().to_string(), locator: Locator { t_end: saved.secs.filter(|_| kind != Kind::Image), ..Locator::default() } },
         stamp,
-        names: saved.names,
+        names,
         parts: saved.parts.into_iter().map(Part::from).collect(),
     })
+}
+
+/// A song's title and subtitle ("Keys on the Counter", "Song · Kitchen Radio · 3:42")
+/// or a recording's ("2026-10-05 meetup budget.m4a", "Recording · 5 Oct · 0:43").
+fn audio_text(path: &Path, home: &Path, name: &str, s: &Saved) -> (String, String) {
+    let join = |bits: [Option<String>; 3]| bits.into_iter().flatten().collect::<Vec<_>>().join(" · ");
+    let length = s.secs.map(length);
+    if !song(path, home, s.music) {
+        let day = day(name).or_else(|| s.made.as_deref().and_then(day));
+        return (name.to_owned(), join([Some("Recording".into()), day, length]));
+    }
+    let title = s.title.clone().unwrap_or_else(|| untracked(&path.file_stem().unwrap_or_default().to_string_lossy()).to_owned());
+    (title, join([Some("Song".into()), s.artist.clone(), length]))
+}
+
+/// A song has music tags or lyrics (`music`), or sits in ~/Music; voice memos, meetings and
+/// podcasts (told by their folders) and other audio are recordings: mostly speech.
+fn song(path: &Path, home: &Path, music: bool) -> bool {
+    let dirs = path.parent().map_or(Path::new(""), |p| p.strip_prefix(home).unwrap_or(p));
+    !speech(&dirs.to_string_lossy()) && (music || path.starts_with(home.join("Music")))
+}
+
+/// Whether folders or a genre name speech: "Voice Memos", "Recordings", "Podcasts", "Spoken Word".
+fn speech(s: &str) -> bool {
+    let words = ["memo", "recording", "recorder", "podcast", "meeting", "lecture", "audiobook", "speech", "spoken"];
+    s.to_lowercase().split(|c: char| !c.is_alphanumeric()).any(|w| words.contains(&w.trim_end_matches('s')))
+}
+
+/// "Keys on the Counter" for "03 - Keys on the Counter", "1-03. …" or "03_…": a track
+/// number has two or three digits, so "7 Rings" and "2026-10-05 memo" stay.
+fn untracked(stem: &str) -> &str {
+    let disc = if stem.as_bytes().get(..2).is_some_and(|b| b[0].is_ascii_digit() && b[1] == b'-') { 2 } else { 0 };
+    let n = stem[disc..].len() - stem[disc..].trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    let rest = &stem[disc + n..];
+    let title = rest.trim_start_matches([' ', '.', '-', '_']);
+    if (2..=3).contains(&n) && title.len() < rest.len() && !title.is_empty() { title } else { stem }
+}
+
+/// "5 Oct" for text that starts with 2026-10-05, "5 Oct 2025" in another year.
+fn day(s: &str) -> Option<String> {
+    let b = s.as_bytes().get(..10)?;
+    if !b.iter().enumerate().all(|(i, c)| if i == 4 || i == 7 { *c == b'-' } else { c.is_ascii_digit() }) {
+        return None;
+    }
+    let (y, m, d) = (&s[..4], s[5..7].parse::<usize>().ok()?, s[8..10].parse::<u32>().ok()?);
+    let month = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"].get(m.checked_sub(1)?)?;
+    let this_year = (1970 + std::time::SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs() / 31_556_952).to_string();
+    (1..=31).contains(&d).then(|| if y == this_year { format!("{d} {month}") } else { format!("{d} {month} {y}") })
+}
+
+/// "0:42", "3:12", "1:02:03".
+fn length(secs: f32) -> String {
+    let s = secs.round() as u64;
+    if s >= 3600 { format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60) } else { format!("{}:{:02}", s / 60, s % 60) }
 }
 
 /// The 160 px thumbnail of a photo's or video frame's `Embed::Image` (for `Hit::thumb`).
@@ -179,11 +242,18 @@ fn fnv(bytes: &[u8]) -> u64 {
 
 /// Everything slow that `doc` produces, as saved in `parts.json`.
 #[derive(Default, Serialize, Deserialize)]
+#[serde(default)]
 struct Saved {
     icon: String,
     artist: Option<String>,
     names: Vec<String>,
     parts: Vec<Piece>,
+    /// Audio: the title tag, the length in seconds, the day it was made (creation_time tag),
+    /// and whether it has music tags (artist, album) or lyrics and no speech genre.
+    title: Option<String>,
+    secs: Option<f32>,
+    made: Option<String>,
+    music: bool,
 }
 
 /// A `Part` that can be saved: `image` becomes `Embed::Image`, else `embed` becomes `Embed::Text`.
@@ -219,7 +289,7 @@ fn build(kind: Kind, path: &Path, home: &Path, dir: &Path) -> (Saved, bool) {
     let limit = Duration::from_secs_f32(GRACE + 3.0 * secs);
     let tag = |key: &str| tags(&info).find(|(k, _)| k == key).map(|(_, v)| v);
     let title = tag("title").unwrap_or_else(|| path.file_name().unwrap_or_default().to_string_lossy().into_owned());
-    let mut s = Saved { icon: generic(kind), artist: tag("artist"), ..Saved::default() };
+    let mut s = Saved { icon: generic(kind), artist: tag("artist"), title: tag("title"), secs: duration, made: tag("creation_time"), ..Saved::default() };
     s.names = ["title", "artist", "album"].into_iter().filter_map(tag).collect();
     s.names.dedup();
     let has = |kind: &str| info["streams"].as_array().is_some_and(|a| a.iter().any(|s| s["codec_type"] == kind));
@@ -258,6 +328,7 @@ fn build(kind: Kind, path: &Path, home: &Path, dir: &Path) -> (Saved, bool) {
         }
         _ => {
             let lines = lyrics(path, &info);
+            s.music = (!lines.is_empty() || s.artist.is_some() || tag("album").is_some()) && !tag("genre").is_some_and(|g| speech(&g));
             if lines.is_empty() {
                 let words = transcript(path, home, dir, &title, limit);
                 complete = words.is_some();

@@ -14,7 +14,7 @@ use std::sync::{Mutex, RwLock};
 use std::time::Duration;
 
 /// Bump to read every file and source again (vectors are kept for unchanged text).
-const INDEX_VERSION: &str = "2";
+const INDEX_VERSION: &str = "3"; // 3: song titles without the artist, rows with the media length
 /// Bump when the model or vector format changes: the index starts over.
 const MODEL: &str = "embeddinggemma-2-q8:768:i8";
 

@@ -47,6 +47,31 @@ fn small_helpers() {
     assert_eq!(cut("héllo", 2), "hé");
     assert_eq!(cut("hi", 5), "hi");
     assert_eq!(syncsafe(&[0, 0, 2, 1]), 257);
+    assert_eq!([length(42.4), length(192.0), length(3723.0)], ["0:42", "3:12", "1:02:03"]);
+    assert!(["Music/Voice Memos", "Podcasts/Hard Fork", "Call Recordings", "Spoken Word"].iter().all(|s| speech(s)));
+    assert!(!["Music/Summer Memories", "Music/Voices of Africa", "Music/Recorded Live"].iter().any(|s| speech(s)));
+}
+
+#[test]
+fn track_numbers_and_days() {
+    for (stem, want) in [
+        ("03 - Keys on the Counter", "Keys on the Counter"),
+        ("1-03. Ferry", "Ferry"),
+        ("07_Rain", "Rain"),
+        ("101 Dalmatians Theme", "Dalmatians Theme"),
+        ("7 Rings", "7 Rings"),
+        ("2026-10-05 meetup budget", "2026-10-05 meetup budget"),
+        ("Kitchen Radio - Ferry to the City", "Kitchen Radio - Ferry to the City"),
+        ("01", "01"),
+    ] {
+        assert_eq!(untracked(stem), want, "{stem}");
+    }
+    let year = 1970 + std::time::SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() / 31_556_952;
+    assert_eq!(day(&format!("{year}-10-05 meetup budget.m4a")).as_deref(), Some("5 Oct"));
+    assert_eq!(day("2019-03-07T10:22:31.000000Z").as_deref(), Some("7 Mar 2019"));
+    for s in ["2019-13-07 x", "2019-03-00", "20190307", "memo 2019-03-07", "2019-0é-07", ""] {
+        assert_eq!(day(s), None, "{s}");
+    }
 }
 
 /// An ID3v2 tag (version 3 or 4) holding `frames` (id, body).
@@ -313,10 +338,10 @@ fn song_with_id3_lyrics() {
     let path = s.home().join("Music/uslt.mp3");
     fs::write(&path, [id3(3, &[(b"TIT2", tit2), (b"TPE1", tpe1), (b"USLT", uslt)]), audio.clone()].concat()).unwrap();
     let d = doc(&path, &s.home(), &s.cache()).unwrap();
-    assert_eq!(d.subtitle, "~/Music · The Band");
-    assert_eq!(d.names, vec!["Rainy Day", "The Band"]);
+    assert_eq!((d.title.as_str(), d.subtitle.as_str()), ("Rainy Day", "Song · The Band · 0:04"));
+    assert_eq!(d.names, vec!["Rainy Day", "The Band", "uslt.mp3"]);
     let q = quick_doc(&path, &s.home(), &s.cache()).unwrap();
-    assert_eq!((q.subtitle, q.names, q.icon), (d.subtitle.clone(), d.names.clone(), d.icon.clone()), "quick_doc reuses doc's tags");
+    assert_eq!((q.title, q.subtitle, q.names, q.icon), (d.title.clone(), d.subtitle.clone(), d.names.clone(), d.icon.clone()), "quick_doc reuses doc's tags");
     assert_eq!(d.parts.len(), 1);
     assert_eq!(d.parts[0].text, "Rain on the window\nI miss you");
     assert!(matches!(&d.parts[0].embed, Embed::Text(t) if t.starts_with("title: Rainy Day | text: Rain")));
@@ -327,6 +352,49 @@ fn song_with_id3_lyrics() {
     let d = doc(&path, &s.home(), &s.cache()).unwrap();
     let timed: Vec<_> = d.parts.iter().map(|p| (p.text.as_str(), p.locator.t)).collect();
     assert_eq!(timed, vec![("Rain on the window\nI miss you", None), ("Rain on the window", Some(0.5)), ("I miss you", Some(2.0))]);
+}
+
+/// Two seconds of tone at `path` with `tags` ("artist=The Band").
+fn tagged(path: &Path, tags: &[&str]) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut args = vec!["-f", "lavfi", "-i", "sine=frequency=440:duration=2"];
+    args.extend(tags.iter().flat_map(|t| ["-metadata", t]));
+    ffmpeg(&args, path);
+}
+
+#[test]
+fn songs_and_recordings() {
+    let s = Scratch::new("songs");
+    let year = 1970 + std::time::SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() / 31_556_952;
+    let memo = format!("Music/Voice Memos/{year}-10-05 meetup budget.m4a");
+    let cases = [
+        // Phone recorders tag a title, and podcasts an artist and album: their folders decide.
+        (memo.as_str(), &["title=meetup budget"][..], memo.rsplit('/').next().unwrap().to_owned(), "Recording · 5 Oct · 0:02"),
+        ("Podcasts/Hard Fork/ep 101.mp3", &["title=Episode 101", "artist=NYT", "album=Hard Fork"], "ep 101.mp3".into(), "Recording · 0:02"),
+        ("Music/Kitchen Radio/Demo Tapes/02 - Keys.mp3", &["title=Keys on the Counter", "artist=Kitchen Radio", "album=Demo Tapes"], "Keys on the Counter".into(), "Song · Kitchen Radio · 0:02"),
+        ("Music/03 - Untagged Song.mp3", &[], "Untagged Song".into(), "Song · 0:02"),
+        ("Downloads/mixtape.mp3", &["album=Summer"], "mixtape".into(), "Song · 0:02"),
+        ("Downloads/talk.mp3", &["artist=Someone", "genre=Speech"], "talk.mp3".into(), "Recording · 0:02"),
+        ("Downloads/call.m4a", &["title=Call with Sam", "creation_time=2019-03-07T10:22:31Z"], "call.m4a".into(), "Recording · 7 Mar 2019 · 0:02"),
+    ];
+    for (rel, tags, title, subtitle) in cases {
+        let path = s.home().join(rel);
+        tagged(&path, tags);
+        let d = doc(&path, &s.home(), &s.cache()).unwrap();
+        assert_eq!((d.title.as_str(), d.subtitle.as_str()), (title.as_str(), subtitle), "{rel}");
+        assert!(matches!(&d.action, Action::Open { locator, .. } if locator.t_end.is_some_and(|e| (e - 2.0).abs() < 0.1)), "{rel}: the whole file's length");
+        assert_eq!(d.names.last().is_some_and(|n| rel.ends_with(n.as_str())), title != *rel.rsplit('/').next().unwrap(), "{rel}: the file name is a name when the title differs");
+    }
+    // Before the slow work, the folder alone decides.
+    let q = |rel: &str| {
+        let path = s.home().join(rel);
+        fs::write(&path, "not yet read").unwrap();
+        let q = quick_doc(&path, &s.home(), &s.cache()).unwrap();
+        (q.title, q.subtitle)
+    };
+    assert_eq!(q("Music/04 Saturday.mp3"), ("Saturday".into(), "Song".into()));
+    assert_eq!(q("Music/Voice Memos/2019-03-07 app idea.m4a"), ("2019-03-07 app idea.m4a".into(), "Recording · 7 Mar 2019".into()));
+    assert_eq!(q("Downloads/04 Saturday.mp3"), ("04 Saturday.mp3".into(), "Recording".into()));
 }
 
 #[test]

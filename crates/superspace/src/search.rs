@@ -474,14 +474,21 @@ fn order(mem: &Mem, v: &mut [(i64, Sig)]) {
     rest.sort_by(|a, b| key(a).cmp(&key(b)).then(b.1.score.total_cmp(&a.1.score)).then(a.0.cmp(&b.0)));
 }
 
+/// At most `n` characters and "…", cut after the last whole word that fits.
 fn clip(text: &str, n: usize) -> String {
     let t = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if t.chars().count() <= n { t } else { t.chars().take(n).collect::<String>() + "…" }
+    if t.chars().count() <= n {
+        return t;
+    }
+    let head: String = t.chars().take(n + 1).collect();
+    let end = head.rfind(' ').unwrap_or_else(|| head.char_indices().last().unwrap().0);
+    format!("{}…", head[..end].trim_end_matches(|c: char| !c.is_alphanumeric()))
 }
 
 /// About 160 characters around the first place where the most different query
-/// words come close together, with every query word (at a word start) marked.
-/// Marks are character offsets, end exclusive.
+/// words come close together, cut between words with "…" where text was left
+/// out, with every query word (at a word start) marked. Marks are character
+/// offsets, end exclusive.
 pub fn snippet(text: &str, toks: &[String]) -> Snippet {
     let chars: Vec<char> = text.split_whitespace().collect::<Vec<_>>().join(" ").chars().collect();
     let lower: Vec<char> = chars.iter().map(|c| c.to_lowercase().next().unwrap_or(*c)).collect();
@@ -502,13 +509,15 @@ pub fn snippet(text: &str, toks: &[String]) -> Snippet {
     let words = |i: usize| marks[i..].iter().take_while(|m| m.1 <= marks[i].0 + 130).map(|m| &lower[m.0..m.1]).collect::<HashSet<_>>().len();
     let best = (0..marks.len()).max_by_key(|&i| (words(i), std::cmp::Reverse(i))).map(|i| marks[i].0);
     let start = match best {
-        Some(m) if m > 30 => (m - 30..m).find(|&j| chars[j - 1] == ' ').unwrap_or(m),
+        Some(m) if m > 30 => (m - 30..m).find(|&j| chars[j - 1] == ' ' && chars[j].is_alphanumeric()).unwrap_or(m),
         _ => 0,
     };
-    let end = (start + 160).min(chars.len());
+    let lead = usize::from(start > 0);
+    let text = format!("{}{}", "…".repeat(lead), clip(&chars[start..].iter().collect::<String>(), 160));
+    let len = text.chars().count();
     Snippet {
-        text: chars[start..end].iter().collect(),
-        marks: marks.into_iter().filter(|m| m.0 >= start && m.1 <= end).map(|(a, b)| (a - start, b - start)).collect(),
+        marks: marks.into_iter().filter(|m| m.0 >= start).map(|(a, b)| (a - start + lead, b - start + lead)).filter(|m| m.1 <= len).collect(),
+        text,
     }
 }
 
@@ -532,16 +541,20 @@ fn label(mem: &Mem, it: &Item, part: i64) -> Option<&'static str> {
 
 /// Hits and the snippet are made here, for shown rows only.
 fn make_row(c: &Connection, mem: &Mem, it: &Item, s: &Sig, toks: &[String], w: &[f32; NF]) -> Row {
+    // Audio text has line breaks only between a song's lyric lines: shown, they read "line / line".
+    let text = |p| if it.kind == Kind::Audio { part_text(c, p).replace('\n', " / ") } else { part_text(c, p) };
     let hits: Vec<Hit> = hits(mem, it, &s.above, &s.kw, toks)
         .into_iter()
-        .map(|h| Hit { text: label(mem, it, h.part).map_or_else(|| clip(&part_text(c, h.part), 140), String::from), locator: h.loc, score: h.score, thumb: h.thumb })
+        .map(|h| Hit { text: label(mem, it, h.part).map_or_else(|| clip(&text(h.part), 140), String::from), locator: h.loc, score: h.score, thumb: h.thumb })
         .collect();
-    let snippet = snip(mem, s, w).into_iter().map(|p| snippet(&part_text(c, p), toks)).find(|x| !x.text.is_empty());
+    let snippet = snip(mem, s, w).into_iter().map(|p| snippet(&text(p), toks)).find(|x| !x.text.is_empty());
     let mut action = it.action.clone();
+    // The file's length (media's action spans the whole file); else, indexed before that, where its parts end.
+    let whole = match &action { Action::Open { locator, .. } => locator.t_end, _ => None };
+    let duration = whole.or_else(|| it.parts.iter().filter_map(|p| mem.parts.get(p).and_then(|p| p.locator.t_end.or(p.locator.t))).reduce(f32::max));
     if let (Action::Open { locator, .. }, Some(h)) = (&mut action, hits.first()) {
         *locator = h.locator.clone();
     }
-    let duration = it.parts.iter().filter_map(|p| mem.parts.get(p).and_then(|p| p.locator.t_end.or(p.locator.t))).reduce(f32::max);
     Row { key: it.key.clone(), kind: it.kind, title: it.title.clone(), subtitle: it.subtitle.clone(), icon: it.icon.clone(), action,
         score: (s.score * 1000.0).round() / 1000.0, why: s.why(w), snippet, hits, duration }
 }

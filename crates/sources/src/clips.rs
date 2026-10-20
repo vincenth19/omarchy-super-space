@@ -222,7 +222,7 @@ fn active_window() -> Option<Source> {
 
 /// Name and icon for a window class: the desktop entry with that
 /// StartupWMClass or id, or for a Chromium web app the entry that opens its site.
-fn app_for(class: &str, entries: &[apps::Entry]) -> (String, String) {
+pub(crate) fn app_for(class: &str, entries: &[apps::Entry]) -> (String, String) {
     let site = class.strip_prefix("chrome-").and_then(|r| r.split("__").next()).filter(|s| !s.is_empty());
     let entry = entries
         .iter()

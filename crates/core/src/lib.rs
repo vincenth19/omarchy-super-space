@@ -145,7 +145,7 @@ pub struct Row {
     /// Best parts first, at most 8; for audio and video, each is a section (`t` to `t_end`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hits: Vec<Hit>,
-    /// Seconds, for audio and video: the end of its last part.
+    /// Seconds, for audio and video: the file's length.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration: Option<f32>,
 }

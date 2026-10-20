@@ -556,7 +556,10 @@ fn snippet_marks_query_words_at_word_starts() {
     let s = search::snippet(&long, &["golden".into(), "retr".into()]);
     let marked: Vec<String> = s.marks.iter().map(|&(a, b)| s.text.chars().skip(a).take(b - a).collect()).collect();
     assert_eq!(marked, ["golden", "retr"]);
-    assert!(s.text.starts_with("word") && s.text.chars().count() <= 160);
+    assert!(s.text.starts_with("…word "), "cut between words: {}", s.text);
+    let s = search::snippet(&"Residential tenancy 31 ".repeat(20), &[]);
+    assert!(s.text.ends_with('…') && s.text.chars().count() <= 161, "{}", s.text);
+    assert!(s.text.trim_end_matches('…').split(' ').all(|w| ["Residential", "tenancy", "31"].contains(&w)), "never mid-word: {}", s.text);
     assert!(search::snippet("übergolden", &["golden".into()]).marks.is_empty());
     let s = search::snippet(&format!("golden {long}"), &["golden".into(), "retr".into()]);
     assert!(s.text.ends_with("the golden retriever ran") && s.marks.len() == 2, "where both words are, not the first word: {}", s.text);
@@ -776,6 +779,8 @@ fn hits_put_named_and_keyword_parts_first_and_keep_lyric_lines() {
     assert!(matches!(&r.action, Action::Open { locator, .. } if locator.sheet.as_deref() == Some("Toowong")));
     let r = row("spare key light", "file:Music/keys.mp3");
     assert_eq!(r.hits.iter().map(|h| h.locator.t).collect::<Vec<_>>(), [Some(2.0)], "the lyric line, though the whole lyrics matched by meaning");
+    let r = row("light counter", "file:Music/keys.mp3");
+    assert!(r.snippet.unwrap().text.contains("light on / your keys"), "lyric lines shown apart");
 }
 
 #[test]
@@ -897,6 +902,7 @@ fn media_hits_are_sections_that_take_in_moments_just_under_the_cutoff() {
         Doc { parts: frames.iter().enumerate().map(|(i, (w, l))| frame(i, w, l.clone())).collect(), ..doc("file:v.mp4", Kind::Video, "v.mp4", "", &[]) },
         Doc { parts: vec![window("sponsor gives six hundred dollars", at(0.0, 13.0)), window("venue costs five hundred", at(13.0, 27.0)),
             window("venue costs include projector", at(27.0, 38.0)), window("library free room backup", at(38.0, 50.0))],
+            action: Action::Open { path: "/home/u/memo.m4a".into(), locator: Locator { t_end: Some(55.0), ..Locator::default() } },
             ..doc("file:memo.m4a", Kind::Audio, "memo.m4a", "", &[]) },
     ]);
     let row = |q: &str| t.search(q).0.into_iter().find(|r| r.kind != Kind::Web).unwrap();
@@ -904,7 +910,7 @@ fn media_hits_are_sections_that_take_in_moments_just_under_the_cutoff() {
     let v = row("golden retriever");
     assert_eq!((sections(&v), v.duration), (vec![(45.0, 59.0), (10.0, 30.0)], Some(59.0)), "best first; the near frames, just under the cutoff, too");
     let m = row("venue costs");
-    assert_eq!((sections(&m), m.duration), (vec![(13.0, 38.0)], Some(50.0)), "neighbouring windows as one section");
+    assert_eq!((sections(&m), m.duration), (vec![(13.0, 38.0)], Some(55.0)), "neighbouring windows as one section; the file's length, past the speech");
     assert!(m.hits[0].text.starts_with("venue costs"));
 }
 

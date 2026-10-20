@@ -1,7 +1,7 @@
 //! Non-file sources: apps, settings, emoji, clipboard, browser history. Owner: sources agent.
 //!
 //! Everything here only reads: desktop entries, Omarchy's menu and command
-//! list, Omarchy's clipboard history and a copy of Chromium's history. The one
+//! list, Omarchy's clipboard history and copies of the browsers' histories. The one
 //! file written is the clip-source record under the daemon's state folder.
 //! Stamps cover the embedded text only: a Doc whose subtitle or icon changed
 //! but whose text did not keeps its stamp (clip and history subtitles carry a
@@ -25,7 +25,7 @@ use ss_core::{Embed, Locator, Part, doc_text};
 use std::path::{Path, PathBuf};
 
 /// Files and folders whose change means the sources above must be read
-/// again. Some may not exist yet (no Chromium, no menu extension).
+/// again. Some may not exist yet (no menu extension, no clipboard history).
 pub fn watch_paths() -> Vec<PathBuf> {
     let mut paths = apps::dirs();
     paths.push(apps::hides_file());

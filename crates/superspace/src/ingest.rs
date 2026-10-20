@@ -557,10 +557,10 @@ fn input(p: &Pending) -> Input<'_> {
 }
 
 /// Which source a watched path belongs to (`watch_paths` lists the app
-/// folders, the menus and shell.json, the clipboard files and Chromium's).
+/// folders, the menus and shell.json, the clipboard files and the browsers').
 fn source_kind(p: &Path) -> Kind {
     match p.file_name().and_then(|n| n.to_str()) {
-        Some("History" | "Bookmarks") => Kind::History,
+        Some("History" | "Bookmarks" | "places.sqlite" | "places.sqlite-wal") => Kind::History,
         Some("clipboard-history.json" | "clip-sources.json") => Kind::Clip,
         Some("omarchy-menu.jsonc" | "shell.json") => Kind::Setting,
         _ => Kind::App,
