@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.vincenth19.superspace",
   "name": "Super Space",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "author": "Vincent H",
   "description": "Spotlight that understands meaning, fully local: apps, settings, files and the text inside them, photos, video moments, spoken words, clipboard, emoji and instant answers",
   "license": "MIT",
