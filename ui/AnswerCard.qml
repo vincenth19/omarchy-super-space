@@ -25,7 +25,7 @@ BorderSurface {
     horizontalAlignment: Text.AlignHCenter
     textFormat: Text.PlainText
     elide: Text.ElideRight
-    font.family: Style.font.menuFamily
+    font.family: Qt.application.font.family
   }
 
   Column {

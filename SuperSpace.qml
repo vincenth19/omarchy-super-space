@@ -35,7 +35,8 @@ Item {
   property int sel: 0           // 0 is the answer card when there is one
   property string selKey: ""    // the key the selection stays on as responses arrive
   property int hit: 0           // the selected row's picked hit, an index into its hits
-  property string mode: "text"  // "sections": Tab went into the selected row's hits, ←/→ step them
+  // "text": ←/→ move the cursor; "rows": ↑/↓ chose a row, ←/→ step its hits; "sections": Tab listed them, ←/→ step them
+  property string mode: "text"
   property var activated: null  // the last activate sent, for the test bench
   property var perf: []         // [phase, ms] per response since opening, for the bench
   property var indexing: null   // the latest response's {done, total, stage}, while the daemon is still indexing
@@ -47,6 +48,13 @@ Item {
   readonly property int offset: answer ? 1 : 0
   readonly property var current: sel >= offset ? rows[sel - offset] || null : null
   readonly property string selectedKey: (target(sel) || {}).key || ""
+  // What ←/→ step in the selected row, for the key hints.
+  readonly property string parts: {
+    var h = current && current.hits || [], l = (h[0] || {}).locator || {}
+    return h.length < 2 ? "" : current.kind === "emoji" ? "emoji" : l.t !== undefined ? "sections" : l.page ? "pages"
+         : l.slide ? "slides" : l.sheet ? "sheets" : l.line ? "lines" : "matches"
+  }
+  readonly property string sans: Qt.application.font.family  // the system's UI sans
 
   function open(payloadJson) {
     perf = []
@@ -56,6 +64,7 @@ Item {
 
   function close() {
     opened = false
+    pending = []
     field.text = ""
     if (!setup.running) progress = null
   }
@@ -75,6 +84,7 @@ Item {
       parser: SplitParser { onRead: function(line) { root.receive(line) } }
       onConnectionStateChanged: {
         root.sock = connected ? socket : null
+        root.pending = []  // keys waiting for results that will not come
         if (connected && field.text.trim()) root.search(field.text)
       }
     }
@@ -135,6 +145,7 @@ Item {
 
   function search(q) {
     seq += 1
+    pending = []
     typing.restart()
     if (!q.trim() || !send({ op: "search", id: seq, q: q }))
       show({ phase: "", rows: [] })
@@ -143,7 +154,9 @@ Item {
   function receive(line) {
     var msg
     try { msg = JSON.parse(line) } catch (e) { return }
-    if (msg.id === seq && Array.isArray(msg.rows)) show(msg)
+    if (msg.id !== seq || !Array.isArray(msg.rows)) return
+    show(msg)
+    if (msg.phase === "final") pending.splice(0).forEach(settle)
   }
 
   // Hits are listed best first; they are shown and stepped in document or
@@ -193,13 +206,13 @@ Item {
     filter = msg.filter || null
     rows = all
     phase = msg.phase
-    // A new answer (or a new value) takes the selection, so Enter and Ctrl+C act on it.
+    // The selection is the top until ↑/↓, → or Tab chose one; a chosen one stays on its key, but a
+    // new answer (or a new value) takes it, so Enter and Ctrl+C act on it.
     var found = keep === "answer" ? (answer ? 0 : -1) : rows.findIndex(function(r) { return r.key === keep })
-    if (found < 0 || (answer && JSON.stringify(answer) !== before)) { sel = 0; hit = 0; mode = "text" }
+    if (found < 0 || mode === "text" || (answer && JSON.stringify(answer) !== before)) { sel = 0; hit = 0; mode = "text" }
     else sel = keep === "answer" ? 0 : found + offset
     if (current && hit >= (current.hits || []).length) hit = 0
-    // Landing on the web row by default is not kept: local rows come first.
-    selKey = current ? (found < 0 && current.kind === "web" ? "" : current.key) : answer ? "answer" : ""
+    selKey = current ? current.key : answer ? "answer" : ""
     list.forceLayout()
     glide.stop()
     if (current) list.positionViewAtIndex(sel - offset, ListView.Contain)
@@ -208,21 +221,35 @@ Item {
 
   // ------------------------------------------------------------ keys
 
+  // Enter, Ctrl+1…9, Ctrl+C, Tab, ↑/↓ and → at the end act on the current text's rows, never on a row calm
+  // typing kept from an earlier query: they end the calm at once, so its final phase is shown as
+  // it is, and while that phase is still on the way they wait for it. Typing again drops them,
+  // and so does losing or regaining the daemon or closing; without one they act at once, on what
+  // is shown. `steers`: the mode the key may bring, which changes what later keys mean: "rows" (↑/↓,
+  // Ctrl+N/P, → at the end: ←/→ step parts) or "sections" (Tab: ←/→ step them, Shift+Tab and Esc go back).
+  property var pending: []
+  function settle(act, steers) {
+    typing.stop()
+    if (last.id === seq && phase !== "final") show(last)
+    if (!connected || last.id === seq || !field.text.trim()) act()
+    else pending.push(Object.assign(act, { steers: steers }))
+  }
+
+  // The first ↑/↓ from the field stays on the highlighted row, giving ←/→ to its parts; the next ones move.
   function move(step) {
     var count = offset + rows.length
     if (!count) return
-    sel = Math.max(0, Math.min(count - 1, sel + step))
+    if (mode !== "text") { sel = Math.max(0, Math.min(count - 1, sel + step)); hit = 0 }
     selKey = current ? current.key : "answer"
-    hit = 0
-    mode = "text"
+    mode = "rows"
     glide.stop()
     if (current) list.positionViewAtIndex(sel - offset, ListView.Contain)
   }
 
-  // In sections, ←/→ walk the selected row's hits in drawn order.
+  // In rows and sections, ←/→ walk the selected row's hits in drawn order.
   function stepHit(step) {
-    var o = current._order
-    hit = o[Math.max(0, Math.min(o.length - 1, o.indexOf(hit) + step))]
+    var o = current ? current._order : []
+    if (o.length) hit = o[Math.max(0, Math.min(o.length - 1, o.indexOf(hit) + step))]
   }
 
   // Where Alt+←/→ go, as on macOS: the start of this or the previous word, the end of this or the next.
@@ -246,6 +273,13 @@ Item {
     return r.key === "answer" ? answer.copy : a.path || a.url || a.text || r.title
   }
 
+  // A click on a timeline away from its sections: mpv from that time, as the daemon runs a section.
+  function play(row, t) {
+    if (!(row.action || {}).path) return
+    Quickshell.execDetached(["uwsm-app", "--", "mpv", "--start=" + t.toFixed(1), row.action.path])
+    close()
+  }
+
   // The daemon runs it; alt (Ctrl+Enter) is the alternative: show in folder, or copy.
   function activate(i, alt) {
     var row = target(i)
@@ -266,17 +300,30 @@ Item {
     var side = key === Qt.Key_Left ? -1 : key === Qt.Key_Right ? 1 : 0
     var edge = meta ? side : ctrl ? (key === Qt.Key_Home ? -1 : key === Qt.Key_End ? 1 : 0) : 0  // to the start or the end
     var back = key === Qt.Key_Backtab || (key === Qt.Key_Tab && shift)
+    // Plain ←/→ wait behind a waiting Tab, ↑/↓, Ctrl+N/P or →, and Shift+Tab and Esc behind a waiting Tab, as
+    // those change what they mean. Otherwise, or with no daemon, they act at once: Esc closes, dropping the rest.
+    var waits = pending.map(function(a) { return a.steers })
+    if (connected && ((side && !mods && waits.some(Boolean)) || ((back || key === Qt.Key_Escape) && waits.indexOf("sections") >= 0))) {
+      pending.push(function() { if (!press(key, mods)) field.cursorPosition += side })  // a ←/→ the field would have had
+      return true
+    }
+    // Editing keys give ←/→ back to the cursor (typing and moving the cursor do too).
+    if ([Qt.Key_Home, Qt.Key_End, Qt.Key_Backspace, Qt.Key_Delete].indexOf(key) >= 0 || ((ctrl || meta) && key === Qt.Key_A)) mode = "text"
     if (askBind && !field.text && (enter || key === Qt.Key_Escape)) { bind.running = enter; askBind = false }
     else if (mode === "sections" && (key === Qt.Key_Escape || back)) mode = "text"
     else if (key === Qt.Key_Escape) close()
-    else if (key === Qt.Key_Down || (ctrl && key === Qt.Key_N)) move(1)
-    else if (key === Qt.Key_Up || (ctrl && key === Qt.Key_P)) move(-1)
-    else if (enter) activate(sel, ctrl)
-    else if (mode === "sections" && side && !mods) stepHit(side)
-    else if (key === Qt.Key_Tab && !back && current && (current.hits || []).length) mode = "sections"
-    else if (key === Qt.Key_Tab || back) {}  // nothing to go into or back from: the keyboard stays in the box
-    else if (ctrl && key >= Qt.Key_1 && key <= Qt.Key_9) activate(offset + key - Qt.Key_1)
-    else if (ctrl && key === Qt.Key_C && !field.selectedText && copyText()) { copy(copyText()); close() }
+    else if (key === Qt.Key_Down || (ctrl && key === Qt.Key_N)) settle(function() { move(1) }, "rows")
+    else if (key === Qt.Key_Up || (ctrl && key === Qt.Key_P)) settle(function() { move(-1) }, "rows")
+    else if (enter) settle(function() { activate(sel, ctrl) })
+    else if (mode !== "text" && side && !mods) stepHit(side)
+    // → where the cursor cannot go further steps the selected row's parts, so the top row needs no ↑/↓ first.
+    else if (side > 0 && !mods && !field.selectedText && field.cursorPosition === field.length)
+      settle(function() { if (parts) { mode = "rows"; stepHit(1) } }, "rows")
+    // Tab or Shift+Tab with nothing to go into or back from: the keyboard stays in the box.
+    else if (key === Qt.Key_Tab && !back) settle(function() { if (current && (current.hits || []).length) mode = "sections" }, "sections")
+    else if (back) {}
+    else if (ctrl && key >= Qt.Key_1 && key <= Qt.Key_9) settle(function() { activate(offset + key - Qt.Key_1) })
+    else if (ctrl && key === Qt.Key_C && !field.selectedText) settle(function() { if (copyText()) { copy(copyText()); close() } })
     else if (edge || (alt && side)) {
       var to = edge ? (edge < 0 ? 0 : field.length) : word(side)
       if (shift) field.moveCursorSelection(to); else field.cursorPosition = to
@@ -307,7 +354,7 @@ Item {
         mods |= ({ ctrl: Qt.ControlModifier, shift: Qt.ShiftModifier, alt: Qt.AltModifier, super: Qt.MetaModifier })[p.toLowerCase()] || 0
       })
       var code = ({ Down: Qt.Key_Down, Up: Qt.Key_Up, Left: Qt.Key_Left, Right: Qt.Key_Right, Enter: Qt.Key_Return,
-                    Return: Qt.Key_Return, Escape: Qt.Key_Escape, Tab: Qt.Key_Tab, Backspace: Qt.Key_Backspace })[k]
+                    Return: Qt.Key_Return, Escape: Qt.Key_Escape, Tab: Qt.Key_Tab, Backspace: Qt.Key_Backspace, Home: Qt.Key_Home, End: Qt.Key_End })[k]
       if (code === undefined && k.length === 1) code = k.toUpperCase().charCodeAt(0)  // Qt.Key_A is "A"
       if (code === undefined) return "unknown key: " + k
       if (!root.press(code, mods) && code === Qt.Key_Backspace) field.text = field.text.slice(0, -1)
@@ -367,20 +414,33 @@ Item {
         TextInput {
           id: field
           width: parent.width
-          leftPadding: Style.spacing.rowPaddingX
+          leftPadding: Style.spacing.rowPaddingX + Style.space(36) + Style.spacing.xxl  // in line with the rows' text
           rightPadding: Style.spacing.rowPaddingX + (chip.visible ? chip.width + Style.spacing.lg : 0)
           focus: true
           clip: true
           color: Commons.Color.menu.text
           selectionColor: Style.selectionFill
           selectedTextColor: Commons.Color.menu.text
-          font.family: Style.font.menuFamily
+          font.family: root.sans
           font.pixelSize: Style.font.display
           onTextChanged: { root.mode = "text"; root.search(text) }
-          onCursorPositionChanged: root.mode = "text"  // typing or moving the cursor leaves the sections
+          onCursorPositionChanged: root.mode = "text"  // typing or moving the cursor takes ←/→ back from the rows
           // Like Spotlight: another window taking the keyboard closes the box.
           onActiveFocusChanged: if (!activeFocus && root.opened) root.close()
           Keys.onPressed: function(event) { if (root.press(event.key, event.modifiers)) event.accepted = true }
+
+          Text {  // Omarchy's mark, where the rows have their icons; dim until something is typed
+            x: Style.spacing.rowPaddingX
+            width: Style.space(36)
+            anchors.verticalCenter: parent.verticalCenter
+            horizontalAlignment: Text.AlignHCenter
+            visible: Qt.fontFamilies().indexOf("omarchy") >= 0
+            text: "\ue900"
+            color: Commons.Color.menu.text
+            opacity: field.text ? 1 : 0.52
+            font.family: "omarchy"  // theme-ok: the logo's own glyph font, not a text style
+            font.pixelSize: Style.font.display
+          }
 
           Text {
             x: field.leftPadding
@@ -407,7 +467,7 @@ Item {
               text: root.filterLabel
               textFormat: Text.PlainText
               color: Commons.Color.menu.text
-              font.family: Style.font.menuFamily
+              font.family: root.sans
               font.pixelSize: Style.font.bodySmall
             }
           }
@@ -435,7 +495,7 @@ Item {
           wrapMode: Text.Wrap
           color: p.step === "error" ? Commons.Color.urgent : Commons.Color.menu.text
           opacity: 0.7
-          font.family: Style.font.menuFamily
+          font.family: root.sans
           font.pixelSize: Style.font.title
 
           Rectangle {  // download progress
@@ -455,7 +515,7 @@ Item {
           leftPadding: Style.spacing.rowPaddingX
           text: "Make Super+Space open Super Space?    ↵ yes    esc no"
           color: Commons.Color.menu.selectedText
-          font.family: Style.font.menuFamily
+          font.family: root.sans
           font.pixelSize: Style.font.title
         }
 
@@ -493,15 +553,17 @@ Item {
             required property int index
             width: ListView.view.width
             item: modelData
-            iconSource: root.iconSource(modelData.icon)
+            // A video's icon from the daemon is its first frame, unreadable at icon size: it wears mpv's, as audio does.
+            iconSource: root.iconSource(modelData.kind === "video" && String(modelData.icon).charAt(0) === "/" ? "mpv" : modelData.icon)
             selected: index + root.offset === root.sel
             hit: selected ? root.hit : 0
             expanded: selected && root.mode === "sections"
             notice: root.empty && modelData.kind === "web"
             onClicked: function(pick) {
-              if (pick >= 0) { root.sel = index + root.offset; root.hit = pick }  // an emoji in a strip: pick it, then paste it
+              if (pick >= 0) { root.sel = index + root.offset; root.hit = pick }  // an emoji, page or section: pick it, then open it
               root.activate(index + root.offset)
             }
+            onSeek: function(t) { root.play(modelData, t) }
           }
         }
 
@@ -513,7 +575,7 @@ Item {
           textFormat: Text.PlainText
           color: Commons.Color.menu.text
           opacity: 0.52
-          font.family: Style.font.menuFamily
+          font.family: root.sans
           font.pixelSize: Style.font.caption
         }
 
@@ -523,10 +585,14 @@ Item {
           rightPadding: Style.spacing.rowPaddingX
           visible: list.count > 0 || !!root.answer
           text: root.mode === "sections" ? "← → step    ↵ open there    shift tab or esc back to typing"
-                : "↵ open    ctrl ↵ reveal    tab pages, sections, emoji    ctrl 1–9 row    esc close"
+                : root.mode === "rows" && root.parts ? "← → " + root.parts + "    ↵ open there    tab list them    type, home or end to edit    esc close"
+                : root.parts ? "↵ open    → " + root.parts + "    ↓ ↑ rows    tab list them    ctrl ↵ reveal    esc close"
+                : (root.sel < root.offset ? "↵ copy" : "↵ open    ctrl ↵ reveal")  // an answer copies with or without ctrl
+                  + (root.rows.some(function(r) { return (r.hits || []).length > 1 }) ? "    ↓ then ← → pages, sections, emoji    tab list them" : "")
+                  + "    ctrl 1–9 row    esc close"
           color: Commons.Color.menu.text
           opacity: 0.52
-          font.family: Style.font.menuFamily
+          font.family: root.sans
           font.pixelSize: Style.font.caption
         }
       }
